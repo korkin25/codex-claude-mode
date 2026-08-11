@@ -29,8 +29,11 @@ editing. Starting to type in navigation mode enters the composer without
 dropping the first character. Mouse selection and wheel scrolling are also
 supported. Messages for sub-agents that reject direct turns are routed through
 Main, matching the app-server capability contract, but Main's transport
-messages and service events never appear in the selected agent's log. Agent
-replies are shown without an `Assistant:` wrapper. Agent markers are `●`
+messages never appear in the selected agent's log. User messages use a distinct
+background and a live response timer that freezes when the first answer text
+arrives. Structured activity shows reasoning, web and file searches, commands,
+tool calls, file changes, and sub-agent actions as they happen. Agent replies
+are shown without an `Assistant:` wrapper. Agent markers are `●`
 working, `•` idle, `○` closed, and `!` error.
 
 Agent logs are prefetched once and switching uses the in-memory cache without a

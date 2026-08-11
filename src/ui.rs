@@ -21,9 +21,10 @@ use ratatui::text::Text;
 use ratatui::widgets::Block;
 use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::Wrap;
 
 use crate::model::AgentThread;
+use crate::model::LogEntry;
+use crate::model::LogKind;
 use crate::prompt::PromptResolution;
 use crate::prompt::ServerPrompt;
 
@@ -255,20 +256,12 @@ impl Workspace {
             .split(outer[2]);
         self.agents_area = footer[0];
 
-        let selected = self.selected_thread();
-        let log = self.prompt.as_ref().map_or_else(
-            || {
-                selected
-                    .map(|thread| thread.log.join("\n\n"))
-                    .filter(|log| !log.is_empty())
-                    .unwrap_or_else(|| self.status_line.clone())
-            },
-            ServerPrompt::body,
-        );
         let log_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(outer[0]);
+        self.log_area = log_layout[1];
+        let selected = self.selected_thread();
         let header = self.prompt.as_ref().map_or_else(
             || {
                 selected.map_or_else(
@@ -279,17 +272,27 @@ impl Workspace {
             |_| "Action required".to_string(),
         );
         frame.render_widget(Paragraph::new(header.cyan().bold()), log_layout[0]);
-        self.log_area = log_layout[1];
+        let log_lines = self.prompt.as_ref().map_or_else(
+            || {
+                selected.map_or_else(
+                    || plain_lines(&self.status_line, self.log_area.width),
+                    |thread| {
+                        if thread.log.is_empty() {
+                            plain_lines(&self.status_line, self.log_area.width)
+                        } else {
+                            agent_log_lines(thread, self.log_area.width)
+                        }
+                    },
+                )
+            },
+            |prompt| plain_lines(&prompt.body(), self.log_area.width),
+        );
         let visible_height = self.log_area.height;
-        let line_count = textwrap::wrap(&log, self.log_area.width.max(1) as usize)
-            .len()
-            .min(u16::MAX as usize) as u16;
+        let line_count = log_lines.len().min(u16::MAX as usize) as u16;
         let max_scroll = line_count.saturating_sub(visible_height);
         let scroll = self.scroll.min(max_scroll);
         frame.render_widget(
-            Paragraph::new(Text::raw(log))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0)),
+            Paragraph::new(Text::from(log_lines)).scroll((scroll, 0)),
             self.log_area,
         );
 
@@ -470,6 +473,83 @@ impl Workspace {
             self.input.clear();
         }
     }
+}
+
+fn agent_log_lines(thread: &AgentThread, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for entry in &thread.log {
+        lines.extend(log_entry_lines(entry, width));
+        lines.push(Line::default());
+    }
+    lines.pop();
+    lines
+}
+
+fn log_entry_lines(entry: &LogEntry, width: u16) -> Vec<Line<'static>> {
+    match entry.kind {
+        LogKind::User => {
+            let style = Style::default().bg(user_message_background());
+            let timing = entry
+                .timing_label()
+                .map_or_else(|| "You".to_string(), |timing| format!("You · {timing}"));
+            let mut lines = vec![styled_full_line(format!(" {timing}"), width, style.bold())];
+            lines.extend(
+                wrapped_strings(&entry.text, width.saturating_sub(2))
+                    .into_iter()
+                    .map(|line| styled_full_line(format!(" {line}"), width, style)),
+            );
+            lines
+        }
+        LogKind::Agent => wrapped_strings(&entry.text, width)
+            .into_iter()
+            .map(Line::from)
+            .collect(),
+        LogKind::Activity => wrapped_strings(&format!("› {}", entry.text), width)
+            .into_iter()
+            .map(|line| Line::from(line).fg(Color::Rgb(116, 139, 148)))
+            .collect(),
+    }
+}
+
+fn plain_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    wrapped_strings(text, width)
+        .into_iter()
+        .map(Line::from)
+        .collect()
+}
+
+fn wrapped_strings(text: &str, width: u16) -> Vec<String> {
+    let width = width.max(1) as usize;
+    let lines = text
+        .lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(line, width)
+                    .into_iter()
+                    .map(|line| line.into_owned())
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn styled_full_line(text: String, width: u16, style: Style) -> Line<'static> {
+    let padding = (width as usize).saturating_sub(text.chars().count());
+    Line::from(Span::styled(
+        format!("{text}{}", " ".repeat(padding)),
+        style,
+    ))
+}
+
+fn user_message_background() -> Color {
+    Color::Rgb(31, 47, 56)
 }
 
 fn append_children(order: &mut Vec<String>, parent: &str, threads: &HashMap<String, AgentThread>) {

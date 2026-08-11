@@ -115,6 +115,11 @@ fn workspace_renders_log_above_composer_and_horizontal_agents() {
         workspace.threads.insert(thread.id.clone(), thread);
     }
     workspace.rebuild_tree(Some("01900000-main"));
+    workspace
+        .threads
+        .get_mut("01900000-main")
+        .expect("main thread")
+        .push_user_message("highlighted question".to_string());
     let backend = TestBackend::new(120, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -132,6 +137,8 @@ fn workspace_renders_log_above_composer_and_horizontal_agents() {
 
     assert_eq!(buffer[(0, 0)].symbol(), "M");
     assert!(contents.contains("main log"));
+    assert!(contents.contains("You · waiting 00:00"));
+    assert!(contents.contains("highlighted question"));
     assert!(!contents.contains("Assistant:"));
     assert!(contents.contains("Message · ↑/↓ history"));
     assert!(contents.contains("Main • 0190…main"));
@@ -139,6 +146,12 @@ fn workspace_renders_log_above_composer_and_horizontal_agents() {
     assert!(contents.contains("Activity"));
     assert_eq!(buffer[(1, 18)].style().fg, Some(Color::Reset));
     assert_eq!(buffer[(1, 18)].style().bg, Some(Color::Rgb(42, 50, 56)));
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|cell| cell.style().bg == Some(Color::Rgb(31, 47, 56)))
+    );
 }
 
 #[test]

@@ -280,7 +280,7 @@ impl App {
                             .reject_server_request(&prompt.request_id, "concurrent request");
                     }
                     if let Some(thread) = self.workspace.threads.get_mut(&thread_id) {
-                        thread.log.push(format!("Action required: {method}"));
+                        thread.push_activity_message(format!("Action required: {method}"));
                     }
                     return Ok(());
                 }
@@ -493,7 +493,7 @@ impl App {
         let direct = selected.can_accept_direct_input;
         let is_main = selected.parent_id.is_none();
         if let Some(thread) = self.workspace.threads.get_mut(&selected_id) {
-            thread.log.push(format!("You: {text}"));
+            thread.push_user_message(text.clone());
         }
         let (target_id, routed_text, display_target_id) = if direct || is_main {
             (selected_id, text, None)
@@ -659,6 +659,7 @@ impl App {
             }
             "item/started" | "item/completed" => {
                 let item = params.get("item").unwrap_or(&Value::Null).clone();
+                let completed = method == "item/completed";
                 let source_id = params
                     .get("threadId")
                     .and_then(Value::as_str)
@@ -670,7 +671,7 @@ impl App {
                 if !self.display_routes.is_routed(source_id)
                     && let Some(thread) = self.notification_thread_mut(params)
                 {
-                    thread.complete_item(&item);
+                    thread.update_item(&item, completed);
                 }
             }
             _ => {}
