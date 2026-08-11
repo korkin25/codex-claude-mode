@@ -30,6 +30,11 @@ sub-agents that reject direct turns are routed through Main, matching the
 app-server capability contract. Agent markers are `●` working, `•` idle,
 `○` closed, and `!` error.
 
+Agent logs are prefetched once and switching uses the in-memory cache without a
+new `thread/read`. Agents stay ordered by creation time. When an older Codex
+backend requires a sub-agent message to travel through Main, the transport turn
+is displayed only in the addressed sub-agent log and is hidden from Main.
+
 Interactive command, file-change, and permission approvals are shown in the log
 pane with explicit allow/deny keys. Codex user-input questions and MCP
 elicitations are handled there as well. Unknown or overlapping requests fail

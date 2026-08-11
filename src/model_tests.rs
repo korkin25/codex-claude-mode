@@ -50,3 +50,26 @@ fn streaming_item_is_replaced_by_completed_item() {
 
     assert_eq!(thread.log, vec!["Assistant: hello"]);
 }
+
+#[test]
+fn main_history_hides_subagent_transport_turns() {
+    let value = json!({
+        "id": "main",
+        "parentThreadId": null,
+        "status": {"type": "idle"},
+        "turns": [
+            {"items": [
+                {"type": "userMessage", "content": [{"type": "text", "text": "normal"}]},
+                {"type": "agentMessage", "text": "normal answer"}
+            ]},
+            {"items": [
+                {"type": "userMessage", "content": [{"type": "text", "text": "Пользователь выбрал субагента worker (child). Передай сообщение"}]},
+                {"type": "agentMessage", "text": "transport answer"}
+            ]}
+        ]
+    });
+
+    let thread = AgentThread::from_json(&value).expect("valid thread");
+
+    assert_eq!(thread.log, vec!["You: normal", "Assistant: normal answer"]);
+}

@@ -17,9 +17,9 @@ use crate::prompt::ServerPrompt;
 fn tree_keeps_main_above_nested_agents() {
     let mut workspace = Workspace::new();
     for value in [
-        json!({"id":"child","sessionId":"child","parentThreadId":"main","agentNickname":"child","preview":"","status":{"type":"idle"},"updatedAt":2,"turns":[]}),
-        json!({"id":"main","sessionId":"main","parentThreadId":null,"preview":"","status":{"type":"idle"},"updatedAt":1,"turns":[]}),
-        json!({"id":"grandchild","sessionId":"grandchild","parentThreadId":"child","agentNickname":"nested","preview":"","status":{"type":"idle"},"updatedAt":3,"turns":[]}),
+        json!({"id":"child","sessionId":"child","parentThreadId":"main","agentNickname":"child","preview":"","status":{"type":"idle"},"createdAt":2,"updatedAt":2,"turns":[]}),
+        json!({"id":"main","sessionId":"main","parentThreadId":null,"preview":"","status":{"type":"idle"},"createdAt":1,"updatedAt":1,"turns":[]}),
+        json!({"id":"grandchild","sessionId":"grandchild","parentThreadId":"child","agentNickname":"nested","preview":"","status":{"type":"idle"},"createdAt":3,"updatedAt":3,"turns":[]}),
     ] {
         let thread = AgentThread::from_json(&value).expect("valid thread");
         workspace.threads.insert(thread.id.clone(), thread);
@@ -27,6 +27,30 @@ fn tree_keeps_main_above_nested_agents() {
     workspace.rebuild_tree(Some("main"));
 
     assert_eq!(workspace.order, vec!["main", "child", "grandchild"]);
+}
+
+#[test]
+fn agent_order_does_not_follow_updated_at_changes() {
+    let mut workspace = Workspace::new();
+    for value in [
+        json!({"id":"main","parentThreadId":null,"status":{"type":"idle"},"createdAt":1,"updatedAt":1}),
+        json!({"id":"first","parentThreadId":"main","status":{"type":"idle"},"createdAt":10,"updatedAt":100}),
+        json!({"id":"second","parentThreadId":"main","status":{"type":"idle"},"createdAt":20,"updatedAt":20}),
+    ] {
+        let thread = AgentThread::from_json(&value).expect("valid thread");
+        workspace.threads.insert(thread.id.clone(), thread);
+    }
+    workspace.rebuild_tree(Some("main"));
+    assert_eq!(workspace.order, vec!["main", "first", "second"]);
+
+    workspace
+        .threads
+        .get_mut("second")
+        .expect("second agent")
+        .updated_at = 1_000;
+    workspace.rebuild_tree(Some("main"));
+
+    assert_eq!(workspace.order, vec!["main", "first", "second"]);
 }
 
 #[test]
@@ -98,8 +122,8 @@ fn workspace_renders_log_above_composer_and_horizontal_agents() {
     assert!(contents.contains("Main • 0190…main"));
     assert!(contents.contains("worker ● 0190…hild"));
     assert!(contents.contains("Activity"));
-    assert_eq!(buffer[(1, 18)].style().fg, Some(Color::Cyan));
-    assert_eq!(buffer[(1, 18)].style().bg, Some(Color::Rgb(28, 35, 42)));
+    assert_eq!(buffer[(1, 18)].style().fg, Some(Color::Reset));
+    assert_eq!(buffer[(1, 18)].style().bg, Some(Color::Rgb(42, 50, 56)));
 }
 
 #[test]

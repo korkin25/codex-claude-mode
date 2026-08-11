@@ -1,6 +1,7 @@
 mod backend;
 mod model;
 mod prompt;
+mod routing;
 mod ui;
 
 use std::collections::HashMap;
@@ -26,10 +27,12 @@ use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use model::AgentThread;
+use model::ROUTED_MESSAGE_PREFIX;
 use prompt::PromptResolution;
 use prompt::ServerPrompt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use routing::DisplayRoutes;
 use serde_json::Value;
 use serde_json::json;
 use ui::Action;
@@ -79,8 +82,15 @@ enum Pending {
     Descendants(String),
     Read(String),
     Start,
-    ResumeAndSend { target_id: String, text: String },
-    Turn,
+    ResumeAndSend {
+        target_id: String,
+        text: String,
+        display_target_id: Option<String>,
+    },
+    Turn {
+        source_id: String,
+        display_target_id: Option<String>,
+    },
     Interrupt,
 }
 
@@ -89,6 +99,7 @@ struct App {
     workspace: Workspace,
     pending: HashMap<u64, Pending>,
     loaded_history: HashSet<String>,
+    display_routes: DisplayRoutes,
     preferred_root: Option<String>,
     cwd: PathBuf,
     last_refresh: Instant,
@@ -110,6 +121,7 @@ fn main() -> Result<()> {
         workspace: Workspace::new(),
         pending: HashMap::from([(initialize_id, Pending::Initialize)]),
         loaded_history: HashSet::new(),
+        display_routes: DisplayRoutes::default(),
         preferred_root: args.thread,
         cwd,
         last_refresh: Instant::now(),
@@ -286,6 +298,13 @@ impl App {
 
     fn handle_response(&mut self, pending: Pending, message: &Value) -> Result<()> {
         if let Some(error) = message.get("error") {
+            if let Pending::Turn {
+                source_id,
+                display_target_id: Some(_),
+            } = &pending
+            {
+                self.display_routes.end(source_id);
+            }
             self.workspace.status_line = format!("app-server error: {error}");
             return Ok(());
         }
@@ -323,8 +342,12 @@ impl App {
                     self.workspace.status_line = "new Main thread ready".to_string();
                 }
             }
-            Pending::ResumeAndSend { target_id, text } => self.start_turn(&target_id, &text)?,
-            Pending::Turn => {}
+            Pending::ResumeAndSend {
+                target_id,
+                text,
+                display_target_id,
+            } => self.start_turn(&target_id, &text, display_target_id)?,
+            Pending::Turn { .. } => {}
             Pending::Interrupt => {
                 self.workspace.status_line = "turn interrupted".to_string();
             }
@@ -445,6 +468,14 @@ impl App {
         let Some(thread_id) = self.workspace.selected_id().map(ToOwned::to_owned) else {
             return Ok(());
         };
+        if self.loaded_history.contains(&thread_id)
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::Read(id) if id == &thread_id))
+        {
+            return Ok(());
+        }
         let id = self.backend.request(
             "thread/read",
             json!({"threadId": thread_id, "includeTurns": true}),
@@ -464,8 +495,8 @@ impl App {
         if let Some(thread) = self.workspace.threads.get_mut(&selected_id) {
             thread.log.push(format!("You: {text}"));
         }
-        let (target_id, routed_text) = if direct || is_main {
-            (selected_id, text)
+        let (target_id, routed_text, display_target_id) = if direct || is_main {
+            (selected_id, text, None)
         } else {
             let Some(root_id) = self.workspace.root_id.clone() else {
                 return Ok(());
@@ -473,8 +504,9 @@ impl App {
             (
                 root_id,
                 format!(
-                    "Пользователь выбрал субагента {selected_label} ({selected_id}). Передай ему это сообщение через средство связи с субагентом и покажи его ответ в его потоке:\n\n{text}"
+                    "{ROUTED_MESSAGE_PREFIX}{selected_label} ({selected_id}). Передай ему это сообщение через средство связи с субагентом и покажи его ответ в его потоке:\n\n{text}"
                 ),
+                Some(selected_id),
             )
         };
         let can_send = self
@@ -483,7 +515,7 @@ impl App {
             .get(&target_id)
             .is_some_and(|thread| thread.can_accept_direct_input);
         if can_send {
-            self.start_turn(&target_id, &routed_text)
+            self.start_turn(&target_id, &routed_text, display_target_id)
         } else {
             let id = self
                 .backend
@@ -493,13 +525,23 @@ impl App {
                 Pending::ResumeAndSend {
                     target_id,
                     text: routed_text,
+                    display_target_id,
                 },
             );
             Ok(())
         }
     }
 
-    fn start_turn(&mut self, thread_id: &str, text: &str) -> Result<()> {
+    fn start_turn(
+        &mut self,
+        thread_id: &str,
+        text: &str,
+        display_target_id: Option<String>,
+    ) -> Result<()> {
+        if let Some(display_target_id) = &display_target_id {
+            self.display_routes
+                .begin(thread_id, display_target_id.clone());
+        }
         let id = self.backend.request(
             "turn/start",
             json!({
@@ -507,7 +549,13 @@ impl App {
                 "input": [{"type": "text", "text": text, "textElements": []}]
             }),
         )?;
-        self.pending.insert(id, Pending::Turn);
+        self.pending.insert(
+            id,
+            Pending::Turn {
+                source_id: thread_id.to_string(),
+                display_target_id,
+            },
+        );
         Ok(())
     }
 
@@ -595,13 +643,20 @@ impl App {
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(thread) = self.notification_thread_mut(params) {
+                if let Some(thread) = self.notification_log_thread_mut(params) {
                     thread.append_delta(item_id, delta);
                 }
             }
             "item/started" | "item/completed" => {
                 let item = params.get("item").unwrap_or(&Value::Null).clone();
-                if let Some(thread) = self.notification_thread_mut(params) {
+                let routed_user_message = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|thread_id| self.display_routes.is_routed(thread_id))
+                    && item.get("type").and_then(Value::as_str) == Some("userMessage");
+                if !routed_user_message
+                    && let Some(thread) = self.notification_log_thread_mut(params)
+                {
                     thread.complete_item(&item);
                 }
             }
@@ -613,6 +668,12 @@ impl App {
     fn notification_thread_mut(&mut self, params: &Value) -> Option<&mut AgentThread> {
         let thread_id = params.get("threadId")?.as_str()?;
         self.workspace.threads.get_mut(thread_id)
+    }
+
+    fn notification_log_thread_mut(&mut self, params: &Value) -> Option<&mut AgentThread> {
+        let source_id = params.get("threadId")?.as_str()?;
+        let display_id = self.display_routes.target(source_id).to_string();
+        self.workspace.threads.get_mut(&display_id)
     }
 
     fn start_notified_turn(&mut self, params: &Value) {
@@ -630,8 +691,15 @@ impl App {
     }
 
     fn complete_notified_turn(&mut self, params: &Value) {
+        let source_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         if let Some(thread) = self.notification_thread_mut(params) {
             thread.complete_turn();
+        }
+        if let Some(source_id) = source_id {
+            self.display_routes.end(&source_id);
         }
     }
 }

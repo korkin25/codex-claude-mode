@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+pub(crate) const ROUTED_MESSAGE_PREFIX: &str = "Пользователь выбрал субагента ";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TokenUsage {
     pub(crate) input: i64,
@@ -19,6 +21,7 @@ pub(crate) struct AgentThread {
     pub(crate) preview: String,
     pub(crate) status: String,
     pub(crate) can_accept_direct_input: bool,
+    pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) log: Vec<String>,
     pub(crate) tokens: TokenUsage,
@@ -55,6 +58,10 @@ impl AgentThread {
                 .get("canAcceptDirectInput")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            created_at: value
+                .get("createdAt")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
             updated_at: value
                 .get("updatedAt")
                 .and_then(Value::as_i64)
@@ -74,6 +81,9 @@ impl AgentThread {
             self.label = replacement.label;
             self.preview = replacement.preview;
             self.can_accept_direct_input = replacement.can_accept_direct_input;
+            if replacement.created_at != 0 {
+                self.created_at = replacement.created_at;
+            }
             self.updated_at = replacement.updated_at;
             self.set_status(replacement.status);
             if replacement.active_turn_id.is_some() {
@@ -155,6 +165,7 @@ fn transcript(thread: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|turn| !is_routed_transport_turn(turn))
         .flat_map(|turn| {
             turn.get("items")
                 .and_then(Value::as_array)
@@ -168,14 +179,7 @@ fn transcript(thread: &Value) -> Vec<String> {
 pub(crate) fn render_item(item: &Value) -> Option<String> {
     match item.get("type")?.as_str()? {
         "userMessage" => {
-            let text = item
-                .get("content")?
-                .as_array()?
-                .iter()
-                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = user_message_text(item)?;
             Some(format!("You: {text}"))
         }
         "agentMessage" => Some(format!("Assistant: {}", string(item, "text")?)),
@@ -198,6 +202,28 @@ pub(crate) fn render_item(item: &Value) -> Option<String> {
         "plan" => Some(format!("Plan: {}", string(item, "text")?)),
         other => Some(format!("{other}: completed")),
     }
+}
+
+fn is_routed_transport_turn(turn: &Value) -> bool {
+    turn.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+        .filter_map(user_message_text)
+        .any(|text| text.starts_with(ROUTED_MESSAGE_PREFIX))
+}
+
+fn user_message_text(item: &Value) -> Option<String> {
+    Some(
+        item.get("content")?
+            .as_array()?
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {

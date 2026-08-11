@@ -362,10 +362,7 @@ impl Workspace {
                 break;
             }
             let style = if index == self.selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::Rgb(28, 35, 42))
-                    .bold()
+                Style::default().bg(Color::Rgb(42, 50, 56))
             } else {
                 agent_status_style(self.threads[&self.order[index]].status.as_str())
             };
@@ -472,7 +469,11 @@ fn append_children(order: &mut Vec<String>, parent: &str, threads: &HashMap<Stri
         .values()
         .filter(|thread| thread.parent_id.as_deref() == Some(parent))
         .collect::<Vec<_>>();
-    children.sort_by_key(|thread| thread.updated_at);
+    children.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     for child in children {
         order.push(child.id.clone());
         append_children(order, &child.id, threads);
