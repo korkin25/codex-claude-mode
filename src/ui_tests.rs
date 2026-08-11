@@ -12,6 +12,75 @@ use super::Mode;
 use super::Workspace;
 use crate::model::AgentThread;
 use crate::prompt::ServerPrompt;
+use crate::session::SessionCandidate;
+
+#[test]
+fn session_picker_defaults_to_new_and_can_continue_existing_session() {
+    let mut workspace = Workspace::new();
+    workspace.show_session_picker(vec![SessionCandidate {
+        id: "01900000-existing".to_string(),
+        preview: "previous task".to_string(),
+        updated_at: 1,
+    }]);
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render session picker");
+    let contents =
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .fold(String::new(), |mut text, cell| {
+                text.push_str(cell.symbol());
+                text
+            });
+    assert!(contents.contains("Choose session"));
+    assert!(contents.contains("+ New session"));
+    assert!(contents.contains("Continue · previous task"));
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Action::SessionSelected(None)
+    ));
+
+    workspace.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Action::SessionSelected(Some(id)) if id == "01900000-existing"
+    ));
+}
+
+#[test]
+fn session_picker_blocks_input_while_new_session_is_created() {
+    let mut workspace = Workspace::new();
+    workspace.show_session_picker(Vec::new());
+    workspace.show_session_starting();
+    let backend = TestBackend::new(80, 8);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render starting state");
+    let contents =
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .fold(String::new(), |mut text, cell| {
+                text.push_str(cell.symbol());
+                text
+            });
+
+    assert!(contents.contains("Creating a clean Main session"));
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Action::None
+    ));
+}
 
 #[test]
 fn tree_keeps_main_above_nested_agents() {

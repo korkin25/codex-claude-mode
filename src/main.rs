@@ -2,6 +2,7 @@ mod backend;
 mod model;
 mod prompt;
 mod routing;
+mod session;
 mod ui;
 
 use std::collections::HashMap;
@@ -35,6 +36,7 @@ use ratatui::backend::CrosstermBackend;
 use routing::DisplayRoutes;
 use serde_json::Value;
 use serde_json::json;
+use session::candidates_from_list;
 use ui::Action;
 use ui::Workspace;
 
@@ -101,6 +103,8 @@ struct App {
     loaded_history: HashSet<String>,
     display_routes: DisplayRoutes,
     preferred_root: Option<String>,
+    session_decided: bool,
+    starting_new_session: bool,
     cwd: PathBuf,
     last_refresh: Instant,
 }
@@ -122,6 +126,8 @@ fn main() -> Result<()> {
         pending: HashMap::from([(initialize_id, Pending::Initialize)]),
         loaded_history: HashSet::new(),
         display_routes: DisplayRoutes::default(),
+        session_decided: args.thread.is_some(),
+        starting_new_session: false,
         preferred_root: args.thread,
         cwd,
         last_refresh: Instant::now(),
@@ -216,7 +222,9 @@ fn run_event_loop(
         while let Some(event) = app.backend.try_recv() {
             app.handle_backend_event(event)?;
         }
-        if app.last_refresh.elapsed() >= Duration::from_secs(2)
+        if app.session_decided
+            && !app.starting_new_session
+            && app.last_refresh.elapsed() >= Duration::from_secs(2)
             && app
                 .pending
                 .values()
@@ -241,6 +249,7 @@ fn run_event_loop(
             Action::SelectionChanged => app.read_selected()?,
             Action::ResolvePrompt(resolution) => app.resolve_prompt(resolution)?,
             Action::Interrupt => app.interrupt_selected()?,
+            Action::SessionSelected(root_id) => app.select_session(root_id)?,
             Action::None => {}
         }
     }
@@ -298,6 +307,11 @@ impl App {
 
     fn handle_response(&mut self, pending: Pending, message: &Value) -> Result<()> {
         if let Some(error) = message.get("error") {
+            if matches!(&pending, Pending::Start) {
+                self.starting_new_session = false;
+                self.session_decided = false;
+                self.request_list()?;
+            }
             if let Pending::Turn {
                 source_id,
                 display_target_id: Some(_),
@@ -333,6 +347,8 @@ impl App {
             }
             Pending::Start => {
                 if let Some(thread) = result.get("thread") {
+                    self.starting_new_session = false;
+                    self.workspace.clear_session_picker();
                     self.upsert_thread(thread);
                     self.preferred_root = thread.get("id").and_then(Value::as_str).map(|id| {
                         self.loaded_history.insert(id.to_string());
@@ -373,6 +389,12 @@ impl App {
         {
             self.upsert_thread(thread);
         }
+        if !self.session_decided {
+            self.workspace
+                .show_session_picker(candidates_from_list(result));
+            self.workspace.status_line = "choose a session".to_string();
+            return Ok(());
+        }
         self.workspace.rebuild_tree(self.preferred_root.as_deref());
         if self.workspace.root_id.is_none() {
             let id = self
@@ -384,6 +406,34 @@ impl App {
         }
         self.request_descendants()?;
         self.request_unloaded_history()
+    }
+
+    fn select_session(&mut self, root_id: Option<String>) -> Result<()> {
+        self.session_decided = true;
+        if let Some(root_id) = root_id {
+            self.workspace.clear_session_picker();
+            self.starting_new_session = false;
+            self.preferred_root = Some(root_id.clone());
+            self.workspace.rebuild_tree(Some(&root_id));
+            self.workspace.status_line = format!("opening {root_id}…");
+            self.request_descendants()?;
+            self.request_unloaded_history()
+        } else {
+            self.starting_new_session = true;
+            self.workspace.show_session_starting();
+            self.preferred_root = None;
+            self.loaded_history.clear();
+            self.workspace.threads.clear();
+            self.workspace.order.clear();
+            self.workspace.root_id = None;
+            self.workspace.selected = 0;
+            let id = self
+                .backend
+                .request("thread/start", json!({"cwd": self.cwd.to_string_lossy()}))?;
+            self.pending.insert(id, Pending::Start);
+            self.workspace.status_line = "creating a new Main thread…".to_string();
+            Ok(())
+        }
     }
 
     fn request_descendants(&mut self) -> Result<()> {
@@ -597,8 +647,10 @@ impl App {
             "thread/started" => {
                 if let Some(thread) = params.get("thread") {
                     self.upsert_thread(thread);
-                    self.workspace.rebuild_tree(self.preferred_root.as_deref());
-                    self.request_unloaded_history()?;
+                    if self.session_decided && !self.starting_new_session {
+                        self.workspace.rebuild_tree(self.preferred_root.as_deref());
+                        self.request_unloaded_history()?;
+                    }
                 }
             }
             "thread/status/changed" => {

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -27,6 +29,7 @@ use crate::model::LogEntry;
 use crate::model::LogKind;
 use crate::prompt::PromptResolution;
 use crate::prompt::ServerPrompt;
+use crate::session::SessionCandidate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -41,6 +44,13 @@ pub(crate) enum Action {
     SelectionChanged,
     ResolvePrompt(PromptResolution),
     Interrupt,
+    SessionSelected(Option<String>),
+}
+
+struct SessionPicker {
+    candidates: Vec<SessionCandidate>,
+    selected: usize,
+    starting_new: bool,
 }
 
 pub(crate) struct Workspace {
@@ -61,6 +71,8 @@ pub(crate) struct Workspace {
     agents_area: Rect,
     log_area: Rect,
     composer_area: Rect,
+    session_picker: Option<SessionPicker>,
+    session_hitboxes: Vec<(Rect, usize)>,
 }
 
 impl Workspace {
@@ -83,7 +95,30 @@ impl Workspace {
             agents_area: Rect::default(),
             log_area: Rect::default(),
             composer_area: Rect::default(),
+            session_picker: None,
+            session_hitboxes: Vec::new(),
         }
+    }
+
+    pub(crate) fn show_session_picker(&mut self, candidates: Vec<SessionCandidate>) {
+        self.session_picker = Some(SessionPicker {
+            candidates,
+            selected: 0,
+            starting_new: false,
+        });
+        self.mode = Mode::Navigation;
+    }
+
+    pub(crate) fn clear_session_picker(&mut self) {
+        self.session_picker = None;
+        self.session_hitboxes.clear();
+    }
+
+    pub(crate) fn show_session_starting(&mut self) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.starting_new = true;
+        }
+        self.session_hitboxes.clear();
     }
 
     pub(crate) fn selected_id(&self) -> Option<&str> {
@@ -125,6 +160,30 @@ impl Workspace {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Action {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Action::Quit;
+        }
+        if let Some(picker) = self.session_picker.as_mut() {
+            if picker.starting_new {
+                return Action::None;
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Left => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    picker.selected = (picker.selected + 1).min(picker.candidates.len());
+                }
+                KeyCode::Enter => {
+                    let selected = picker.selected.checked_sub(1).and_then(|index| {
+                        picker
+                            .candidates
+                            .get(index)
+                            .map(|candidate| candidate.id.clone())
+                    });
+                    return Action::SessionSelected(selected);
+                }
+                _ => {}
+            }
+            return Action::None;
         }
         if let Some(prompt) = self.prompt.as_mut() {
             let resolution = prompt.handle_key(key, &mut self.input);
@@ -194,6 +253,27 @@ impl Workspace {
     }
 
     pub(crate) fn handle_mouse(&mut self, event: MouseEvent) -> Action {
+        if self.session_picker.is_some()
+            && event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some((_, index)) = self.session_hitboxes.iter().find(|(area, _)| {
+                area.contains(ratatui::layout::Position::new(event.column, event.row))
+            })
+        {
+            let index = *index;
+            if let Some(picker) = self.session_picker.as_mut() {
+                picker.selected = index;
+                let selected = index.checked_sub(1).and_then(|candidate_index| {
+                    picker
+                        .candidates
+                        .get(candidate_index)
+                        .map(|candidate| candidate.id.clone())
+                });
+                return Action::SessionSelected(selected);
+            }
+        }
+        if self.session_picker.is_some() {
+            return Action::None;
+        }
         if self.prompt.is_some() {
             return Action::None;
         }
@@ -241,6 +321,10 @@ impl Workspace {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        if self.session_picker.is_some() {
+            self.render_session_picker(frame);
+            return;
+        }
         let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -332,6 +416,75 @@ impl Workspace {
                 .saturating_add(self.input.chars().count() as u16)
                 .min(self.composer_area.right().saturating_sub(2));
             frame.set_cursor_position((cursor_x, self.composer_area.y + 1));
+        }
+    }
+
+    fn render_session_picker(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Choose session · ↑/↓ select · Enter open ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        self.session_hitboxes.clear();
+
+        let Some(picker) = self.session_picker.as_ref() else {
+            return;
+        };
+        if picker.starting_new {
+            frame.render_widget(
+                Paragraph::new("Creating a clean Main session…".cyan().bold()),
+                Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
+            );
+            return;
+        }
+        let mut rows = vec![("+ New session".to_string(), 0)];
+        rows.extend(
+            picker
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let preview = if candidate.preview.is_empty() {
+                        "(empty session)"
+                    } else {
+                        candidate.preview.as_str()
+                    };
+                    (
+                        format!(
+                            "Continue · {} · {} · {}",
+                            preview,
+                            relative_time(candidate.updated_at),
+                            short_id(&candidate.id)
+                        ),
+                        index + 1,
+                    )
+                }),
+        );
+
+        let available_width = inner.width.saturating_sub(2) as usize;
+        for (row, (label, index)) in rows.into_iter().enumerate() {
+            if row >= inner.height as usize {
+                break;
+            }
+            let label = truncate_line(&label, available_width);
+            let style = if index == picker.selected {
+                Style::default().bg(Color::Rgb(42, 50, 56)).bold()
+            } else {
+                Style::default()
+            };
+            let row_area = Rect::new(
+                inner.x.saturating_add(1),
+                inner.y + row as u16,
+                inner.width.saturating_sub(2),
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(styled_full_line(label, row_area.width, style)),
+                row_area,
+            );
+            self.session_hitboxes.push((row_area, index));
         }
     }
 
@@ -550,6 +703,29 @@ fn styled_full_line(text: String, width: u16, style: Style) -> Line<'static> {
 
 fn user_message_background() -> Color {
     Color::Rgb(31, 47, 56)
+}
+
+fn relative_time(timestamp: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64);
+    let elapsed = now.saturating_sub(timestamp).max(0) as u64;
+    match elapsed {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", elapsed / 60),
+        3_600..=86_399 => format!("{}h ago", elapsed / 3_600),
+        _ => format!("{}d ago", elapsed / 86_400),
+    }
+}
+
+fn truncate_line(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    format!("{}…", text.chars().take(max_chars - 1).collect::<String>())
 }
 
 fn append_children(order: &mut Vec<String>, parent: &str, threads: &HashMap<String, AgentThread>) {

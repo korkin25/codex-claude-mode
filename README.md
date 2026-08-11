@@ -36,6 +36,11 @@ tool calls, file changes, and sub-agent actions as they happen. Agent replies
 are shown without an `Assistant:` wrapper. Agent markers are `●`
 working, `•` idle, `○` closed, and `!` error.
 
+Startup never silently resumes the newest conversation. It first shows `New
+session` plus the root sessions found for the current working directory;
+Up/Down and Enter create a clean Main or explicitly continue the selected
+session. `--thread <id>` bypasses the picker for intentional scripted resumes.
+
 Agent logs are prefetched once and switching uses the in-memory cache without a
 new `thread/read`. Agents stay ordered by creation time. When an older Codex
 backend requires a sub-agent message to travel through Main, the transport turn
