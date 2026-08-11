@@ -26,9 +26,11 @@ returns to the message composer. Mouse selection and wheel scrolling are also
 supported. Messages for sub-agents that reject direct turns are routed through
 Main, matching the app-server capability contract.
 
-The current first release intentionally rejects interactive approval requests.
-Use it with work that does not require an approval prompt until approval UI is
-implemented.
+Interactive command, file-change, and permission approvals are shown in the log
+pane with explicit allow/deny keys. Codex user-input questions and MCP
+elicitations are handled there as well. Unknown or overlapping requests fail
+closed; the frontend never silently accepts an approval. Press `Ctrl-C` to
+interrupt the selected active turn and `Ctrl-Q` to quit from any mode.
 
 The local frontend and the installed Codex are separate processes. Codex
 credentials remain in the local `CODEX_HOME`; this project neither imports nor

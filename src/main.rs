@@ -1,5 +1,6 @@
 mod backend;
 mod model;
+mod prompt;
 mod ui;
 
 use std::collections::HashMap;
@@ -25,6 +26,8 @@ use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use model::AgentThread;
+use prompt::PromptResolution;
+use prompt::ServerPrompt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use serde_json::Value;
@@ -77,6 +80,7 @@ enum Pending {
     Start,
     ResumeAndSend { target_id: String, text: String },
     Turn,
+    Interrupt,
 }
 
 struct App {
@@ -222,6 +226,8 @@ fn run_event_loop(
             Action::Quit => return Ok(()),
             Action::Submit(text) => app.submit(text)?,
             Action::SelectionChanged => app.read_selected()?,
+            Action::ResolvePrompt(resolution) => app.resolve_prompt(resolution)?,
+            Action::Interrupt => app.interrupt_selected()?,
             Action::None => {}
         }
     }
@@ -250,8 +256,26 @@ impl App {
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("request");
-            self.workspace.status_line = format!("unsupported server request: {method}");
-            return self.backend.reject_server_request(&message["id"], method);
+            match ServerPrompt::from_request(&message) {
+                Ok(prompt) => {
+                    let thread_id = prompt.thread_id.clone();
+                    if let Err(prompt) = self.workspace.set_prompt(prompt) {
+                        self.workspace.status_line =
+                            "another interactive request is already pending".to_string();
+                        return self
+                            .backend
+                            .reject_server_request(&prompt.request_id, "concurrent request");
+                    }
+                    if let Some(thread) = self.workspace.threads.get_mut(&thread_id) {
+                        thread.log.push(format!("Action required: {method}"));
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.workspace.status_line = error;
+                    return self.backend.reject_server_request(&message["id"], method);
+                }
+            }
         }
         if let Some(method) = message.get("method").and_then(Value::as_str) {
             self.handle_notification(method, message.get("params").unwrap_or(&Value::Null))?;
@@ -289,16 +313,19 @@ impl App {
             Pending::Start => {
                 if let Some(thread) = result.get("thread") {
                     self.upsert_thread(thread);
-                    self.preferred_root = thread
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned);
+                    self.preferred_root = thread.get("id").and_then(Value::as_str).map(|id| {
+                        self.loaded_history.insert(id.to_string());
+                        id.to_string()
+                    });
                     self.workspace.rebuild_tree(self.preferred_root.as_deref());
                     self.workspace.status_line = "new Main thread ready".to_string();
                 }
             }
             Pending::ResumeAndSend { target_id, text } => self.start_turn(&target_id, &text)?,
             Pending::Turn => {}
+            Pending::Interrupt => {
+                self.workspace.status_line = "turn interrupted".to_string();
+            }
         }
         Ok(())
     }
@@ -425,6 +452,36 @@ impl App {
         Ok(())
     }
 
+    fn resolve_prompt(&mut self, resolution: PromptResolution) -> Result<()> {
+        self.backend
+            .respond(resolution.request_id, resolution.result)?;
+        if let Some((thread_id, turn_id)) = resolution.interrupt {
+            self.interrupt(&thread_id, &turn_id)?;
+        }
+        Ok(())
+    }
+
+    fn interrupt_selected(&mut self) -> Result<()> {
+        let Some(thread) = self.workspace.selected_thread() else {
+            return Ok(());
+        };
+        let Some(turn_id) = thread.active_turn_id.clone() else {
+            self.workspace.status_line = "selected agent has no active turn".to_string();
+            return Ok(());
+        };
+        let thread_id = thread.id.clone();
+        self.interrupt(&thread_id, &turn_id)
+    }
+
+    fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<()> {
+        let id = self.backend.request(
+            "turn/interrupt",
+            json!({"threadId": thread_id, "turnId": turn_id}),
+        )?;
+        self.pending.insert(id, Pending::Interrupt);
+        Ok(())
+    }
+
     fn handle_notification(&mut self, method: &str, params: &Value) -> Result<()> {
         match method {
             "thread/started" => {
@@ -442,8 +499,13 @@ impl App {
                     thread.set_status(model::status_name(Some(status)));
                 }
             }
-            "turn/started" => self.set_turn_status(params, "working"),
-            "turn/completed" => self.set_turn_status(params, "idle"),
+            "turn/started" => self.start_notified_turn(params),
+            "turn/completed" => self.complete_notified_turn(params),
+            "serverRequest/resolved" => {
+                if let Some(request_id) = params.get("requestId") {
+                    self.workspace.clear_prompt(request_id);
+                }
+            }
             "thread/tokenUsage/updated" => {
                 let total = params.pointer("/tokenUsage/total").unwrap_or(&Value::Null);
                 let input = total
@@ -493,9 +555,23 @@ impl App {
         self.workspace.threads.get_mut(thread_id)
     }
 
-    fn set_turn_status(&mut self, params: &Value, status: &str) {
+    fn start_notified_turn(&mut self, params: &Value) {
+        let turn_id = params
+            .pointer("/turn/id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         if let Some(thread) = self.notification_thread_mut(params) {
-            thread.set_status(status.to_string());
+            if let Some(turn_id) = turn_id {
+                thread.start_turn(turn_id);
+            } else {
+                thread.set_status("working".to_string());
+            }
+        }
+    }
+
+    fn complete_notified_turn(&mut self, params: &Value) {
+        if let Some(thread) = self.notification_thread_mut(params) {
+            thread.complete_turn();
         }
     }
 }

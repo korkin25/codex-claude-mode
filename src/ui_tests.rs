@@ -2,12 +2,15 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use serde_json::json;
 
 use super::Action;
 use super::Mode;
 use super::Workspace;
 use crate::model::AgentThread;
+use crate::prompt::ServerPrompt;
 
 #[test]
 fn tree_keeps_main_above_nested_agents() {
@@ -35,4 +38,46 @@ fn escape_and_enter_switch_modes_without_quitting() {
     assert_eq!(workspace.mode, Mode::Navigation);
     workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(workspace.mode, Mode::Editing);
+}
+
+#[test]
+fn approval_prompt_replaces_log_with_explicit_decisions() {
+    let mut workspace = Workspace::new();
+    workspace
+        .set_prompt(
+            ServerPrompt::from_request(&json!({
+                "id": 7,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "main",
+                    "turnId": "turn",
+                    "command": "curl https://example.com",
+                    "cwd": "/tmp/project",
+                    "availableDecisions": ["accept", "cancel"]
+                }
+            }))
+            .expect("valid approval"),
+        )
+        .expect("no existing prompt");
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render prompt");
+    let contents =
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .fold(String::new(), |mut text, cell| {
+                text.push_str(cell.symbol());
+                text
+            });
+
+    assert!(contents.contains("Action required"));
+    assert!(contents.contains("curl https://example.com"));
+    assert!(contents.contains("approve once"));
+    assert!(contents.contains("decline and interrupt"));
 }

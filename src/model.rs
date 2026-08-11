@@ -24,6 +24,7 @@ pub(crate) struct AgentThread {
     pub(crate) log: Vec<String>,
     pub(crate) tokens: TokenUsage,
     pub(crate) active_since: Option<Instant>,
+    pub(crate) active_turn_id: Option<String>,
     live_items: HashMap<String, usize>,
 }
 
@@ -63,6 +64,7 @@ impl AgentThread {
             log: transcript(value),
             tokens: TokenUsage::default(),
             active_since,
+            active_turn_id: active_turn_id(value),
             live_items: HashMap::new(),
         })
     }
@@ -77,6 +79,9 @@ impl AgentThread {
             self.can_accept_direct_input = replacement.can_accept_direct_input;
             self.updated_at = replacement.updated_at;
             self.set_status(replacement.status);
+            if replacement.active_turn_id.is_some() {
+                self.active_turn_id = replacement.active_turn_id;
+            }
             if !replacement.log.is_empty() {
                 self.log = replacement.log;
                 self.live_items.clear();
@@ -91,6 +96,16 @@ impl AgentThread {
             self.active_since = None;
         }
         self.status = status;
+    }
+
+    pub(crate) fn start_turn(&mut self, turn_id: String) {
+        self.active_turn_id = Some(turn_id);
+        self.set_status("working".to_string());
+    }
+
+    pub(crate) fn complete_turn(&mut self) {
+        self.active_turn_id = None;
+        self.set_status("idle".to_string());
     }
 
     pub(crate) fn elapsed(&self) -> Duration {
@@ -204,6 +219,16 @@ fn strings<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn active_turn_id(thread: &Value) -> Option<String> {
+    thread
+        .get("turns")
+        .and_then(Value::as_array)?
+        .iter()
+        .rev()
+        .find(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
+        .and_then(|turn| string(turn, "id"))
 }
 
 #[cfg(test)]

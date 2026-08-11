@@ -124,6 +124,10 @@ impl Backend {
             }
         }))
     }
+
+    pub(crate) fn respond(&mut self, id: Value, result: Value) -> Result<()> {
+        self.write(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
 }
 
 impl Drop for Backend {

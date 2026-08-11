@@ -21,6 +21,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
 use crate::model::AgentThread;
+use crate::prompt::PromptResolution;
+use crate::prompt::ServerPrompt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -33,6 +35,8 @@ pub(crate) enum Action {
     Quit,
     Submit(String),
     SelectionChanged,
+    ResolvePrompt(PromptResolution),
+    Interrupt,
 }
 
 pub(crate) struct Workspace {
@@ -44,6 +48,7 @@ pub(crate) struct Workspace {
     pub(crate) input: String,
     pub(crate) scroll: u16,
     pub(crate) status_line: String,
+    pub(crate) prompt: Option<ServerPrompt>,
     tree_area: Rect,
     log_area: Rect,
     composer_area: Rect,
@@ -60,6 +65,7 @@ impl Workspace {
             input: String::new(),
             scroll: u16::MAX,
             status_line: "connecting to installed Codex…".to_string(),
+            prompt: None,
             tree_area: Rect::default(),
             log_area: Rect::default(),
             composer_area: Rect::default(),
@@ -104,8 +110,20 @@ impl Workspace {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Action {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Action::Quit;
+        }
+        if let Some(prompt) = self.prompt.as_mut() {
+            let resolution = prompt.handle_key(key, &mut self.input);
+            if let Some(resolution) = resolution {
+                self.prompt = None;
+                self.input.clear();
+                return Action::ResolvePrompt(resolution);
+            }
+            return Action::None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return Action::Interrupt;
         }
         match self.mode {
             Mode::Editing => match key.code {
@@ -144,6 +162,9 @@ impl Workspace {
     }
 
     pub(crate) fn handle_mouse(&mut self, event: MouseEvent) -> Action {
+        if self.prompt.is_some() {
+            return Action::None;
+        }
         match event.kind {
             MouseEventKind::Down(MouseButton::Left)
                 if self
@@ -252,10 +273,15 @@ impl Workspace {
             right[0],
         );
 
-        let log = selected
-            .map(|thread| thread.log.join("\n\n"))
-            .filter(|log| !log.is_empty())
-            .unwrap_or_else(|| self.status_line.clone());
+        let log = self.prompt.as_ref().map_or_else(
+            || {
+                selected
+                    .map(|thread| thread.log.join("\n\n"))
+                    .filter(|log| !log.is_empty())
+                    .unwrap_or_else(|| self.status_line.clone())
+            },
+            ServerPrompt::body,
+        );
         let visible_height = self.log_area.height.saturating_sub(2);
         let line_count = textwrap::wrap(&log, self.log_area.width.saturating_sub(2) as usize)
             .len()
@@ -266,20 +292,39 @@ impl Workspace {
             Paragraph::new(Text::raw(log))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0))
-                .block(Block::new().borders(Borders::ALL).title(" Agent log ")),
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .title(if self.prompt.is_some() {
+                            " Action required "
+                        } else {
+                            " Agent log "
+                        }),
+                ),
             self.log_area,
         );
 
-        let title = match self.mode {
-            Mode::Editing => " Message · Esc navigation ",
-            Mode::Navigation => " Navigation · Enter message · q quit ",
+        let title = self.prompt.as_ref().map_or_else(
+            || match self.mode {
+                Mode::Editing => " Message · Esc navigation ",
+                Mode::Navigation => " Navigation · Enter message · q quit ",
+            },
+            ServerPrompt::composer_title,
+        );
+        let displayed_input = if self.prompt.as_ref().is_some_and(ServerPrompt::masks_input) {
+            "•".repeat(self.input.chars().count())
+        } else {
+            self.input.clone()
         };
         frame.render_widget(
-            Paragraph::new(self.input.as_str())
-                .block(Block::new().borders(Borders::ALL).title(title)),
+            Paragraph::new(displayed_input).block(Block::new().borders(Borders::ALL).title(title)),
             self.composer_area,
         );
-        if self.mode == Mode::Editing {
+        let show_cursor = self
+            .prompt
+            .as_ref()
+            .map_or(self.mode == Mode::Editing, ServerPrompt::accepts_text);
+        if show_cursor {
             let cursor_x = self
                 .composer_area
                 .x
@@ -287,6 +332,26 @@ impl Workspace {
                 .saturating_add(self.input.chars().count() as u16)
                 .min(self.composer_area.right().saturating_sub(2));
             frame.set_cursor_position((cursor_x, self.composer_area.y + 1));
+        }
+    }
+
+    pub(crate) fn set_prompt(&mut self, prompt: ServerPrompt) -> Result<(), Box<ServerPrompt>> {
+        if self.prompt.is_some() {
+            return Err(Box::new(prompt));
+        }
+        self.input.clear();
+        self.prompt = Some(prompt);
+        Ok(())
+    }
+
+    pub(crate) fn clear_prompt(&mut self, request_id: &serde_json::Value) {
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| &prompt.request_id == request_id)
+        {
+            self.prompt = None;
+            self.input.clear();
         }
     }
 }

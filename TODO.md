@@ -17,9 +17,12 @@ probe.
 
 ### [ ] 3. Complete local app-server behavior
 
-Implement typed approval and elicitation UI, interrupts, reconnect/resume,
-durable local event journals, paginated history, multiline composer editing,
-correct wrapped-line scrolling, and explicit selection among multiple roots.
+- [x] Implement fail-closed typed command/file/permission approvals, user-input
+  and MCP elicitation UI, plus active-turn interrupts.
+- [ ] Add reconnect/resume, durable local event journals, paginated history,
+  multiline composer editing, correct wrapped-line scrolling, and explicit
+  selection among multiple roots.
+
 Never silently accept an approval.
 
 ### [ ] 4. Add the compatibility contract
@@ -69,4 +72,3 @@ Threat-model tenant escape, confused deputy behavior, symlink/path traversal,
 credential theft, replay, event injection, stale approvals, log leakage, denial
 of service, and unsafe upgrades. Add adversarial tests, external review,
 incident controls, backup/restore tests, and documented key rotation.
-
