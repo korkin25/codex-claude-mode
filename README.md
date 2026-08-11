@@ -25,10 +25,11 @@ composer sits below it, followed by a horizontal Main/sub-agent bar and the
 selected agent's status, elapsed time, token usage, and full ID. `Esc` enters
 navigation mode; Left/Right select an agent, PageUp/PageDown/Home/End scroll its
 log, and Enter returns to the composer. Up/Down recall message history while
-editing. Mouse selection and wheel scrolling are also supported. Messages for
-sub-agents that reject direct turns are routed through Main, matching the
-app-server capability contract. Agent markers are `●` working, `•` idle,
-`○` closed, and `!` error.
+editing. Starting to type in navigation mode enters the composer without
+dropping the first character. Mouse selection and wheel scrolling are also
+supported. Messages for sub-agents that reject direct turns are routed through
+Main, matching the app-server capability contract. Agent markers are `●`
+working, `•` idle, `○` closed, and `!` error.
 
 Agent logs are prefetched once and switching uses the in-memory cache without a
 new `thread/read`. Agents stay ordered by creation time. When an older Codex

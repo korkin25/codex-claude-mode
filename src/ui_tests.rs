@@ -69,6 +69,20 @@ fn horizontal_arrows_select_agents_in_navigation_mode() {
 }
 
 #[test]
+fn printable_key_enters_editing_without_losing_first_character() {
+    let mut workspace = Workspace::new();
+    workspace.mode = Mode::Navigation;
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+        Action::None
+    ));
+
+    assert_eq!(workspace.mode, Mode::Editing);
+    assert_eq!(workspace.input, "q");
+}
+
+#[test]
 fn editing_arrows_recall_previous_messages_and_restore_draft() {
     let mut workspace = Workspace::new();
     workspace.input = "first".to_string();

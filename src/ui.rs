@@ -162,8 +162,16 @@ impl Workspace {
                 _ => {}
             },
             Mode::Navigation => match key.code {
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Enter | KeyCode::Char('i') => self.mode = Mode::Editing,
+                KeyCode::Enter => self.mode = Mode::Editing,
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.mode = Mode::Editing;
+                    self.input.push(character);
+                    self.history_cursor = None;
+                }
                 KeyCode::Left | KeyCode::Up => {
                     self.selected = self.selected.saturating_sub(1);
                     self.scroll = u16::MAX;
