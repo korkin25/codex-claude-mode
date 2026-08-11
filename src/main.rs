@@ -76,6 +76,7 @@ struct Args {
 enum Pending {
     Initialize,
     List,
+    Descendants(String),
     Read(String),
     Start,
     ResumeAndSend { target_id: String, text: String },
@@ -302,6 +303,7 @@ impl App {
                 self.request_list()?;
             }
             Pending::List => self.apply_list(result)?,
+            Pending::Descendants(root_id) => self.apply_descendants(&root_id, result)?,
             Pending::Read(thread_id) => {
                 if let Some(thread) = result.get("thread") {
                     self.upsert_thread(thread);
@@ -357,9 +359,66 @@ impl App {
             self.workspace.status_line = "creating Main thread…".to_string();
             return Ok(());
         }
+        self.request_descendants()?;
+        self.request_unloaded_history()
+    }
+
+    fn request_descendants(&mut self) -> Result<()> {
+        let Some(root_id) = self.workspace.root_id.clone() else {
+            return Ok(());
+        };
+        if self
+            .pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Descendants(id) if id == &root_id))
+        {
+            return Ok(());
+        }
+        let id = self.backend.request(
+            "thread/list",
+            json!({
+                "limit": 200,
+                "sortKey": "created_at",
+                "sortDirection": "asc",
+                "sourceKinds": [
+                    "subAgent",
+                    "subAgentReview",
+                    "subAgentCompact",
+                    "subAgentThreadSpawn",
+                    "subAgentOther"
+                ],
+                "archived": false,
+                "ancestorThreadId": root_id
+            }),
+        )?;
+        self.pending.insert(id, Pending::Descendants(root_id));
+        Ok(())
+    }
+
+    fn apply_descendants(&mut self, root_id: &str, result: &Value) -> Result<()> {
+        for thread in result
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            self.upsert_thread(thread);
+        }
+        self.workspace.rebuild_tree(Some(root_id));
+        self.request_unloaded_history()
+    }
+
+    fn request_unloaded_history(&mut self) -> Result<()> {
         let ids = self.workspace.order.clone();
         for thread_id in ids {
             if self.loaded_history.contains(&thread_id) {
+                continue;
+            }
+            if self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::Read(id) if id == &thread_id))
+            {
                 continue;
             }
             let id = self.backend.request(
@@ -488,6 +547,7 @@ impl App {
                 if let Some(thread) = params.get("thread") {
                     self.upsert_thread(thread);
                     self.workspace.rebuild_tree(self.preferred_root.as_deref());
+                    self.request_unloaded_history()?;
                 }
             }
             "thread/status/changed" => {

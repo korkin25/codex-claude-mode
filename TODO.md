@@ -10,10 +10,11 @@ test home at `/home/kk573/tmp/codex-agent-picker-test-home`.
 
 ### [x] 2. Implement the first local workspace slice
 
-Render Main and nested sub-agents, independently selected logs, status/time/token
-metrics, keyboard and mouse navigation, a composer, live assistant output, and
-parent-routed sub-agent messages. Add a non-interactive backend compatibility
-probe.
+Render Main and nested sub-agents in a horizontal selector, independently
+selected borderless logs, status/time/token metrics, keyboard and mouse
+navigation, a three-row composer with input history, live assistant output, and
+parent-routed sub-agent messages. Discover persisted descendants through the
+app-server ancestor filter. Add a non-interactive backend compatibility probe.
 
 ### [ ] 3. Complete local app-server behavior
 

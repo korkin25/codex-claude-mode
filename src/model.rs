@@ -14,7 +14,6 @@ pub(crate) struct TokenUsage {
 #[derive(Clone, Debug)]
 pub(crate) struct AgentThread {
     pub(crate) id: String,
-    pub(crate) session_id: String,
     pub(crate) parent_id: Option<String>,
     pub(crate) label: String,
     pub(crate) preview: String,
@@ -48,7 +47,6 @@ impl AgentThread {
         let active_since = (status == "working").then(Instant::now);
         Some(Self {
             id,
-            session_id: string(value, "sessionId").unwrap_or_default(),
             parent_id,
             label,
             preview: string(value, "preview").unwrap_or_default(),
@@ -72,7 +70,6 @@ impl AgentThread {
     pub(crate) fn merge_metadata(&mut self, value: &Value) {
         let replacement = Self::from_json(value);
         if let Some(replacement) = replacement {
-            self.session_id = replacement.session_id;
             self.parent_id = replacement.parent_id;
             self.label = replacement.label;
             self.preview = replacement.preview;

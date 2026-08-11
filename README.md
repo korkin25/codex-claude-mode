@@ -20,11 +20,15 @@ target/release/codex-claude-mode \
   --check-backend
 ```
 
-The left pane contains Main and its sub-agents. `Esc` enters navigation mode,
-arrow keys select an agent, PageUp/PageDown/Home/End scroll its log, and Enter
-returns to the message composer. Mouse selection and wheel scrolling are also
-supported. Messages for sub-agents that reject direct turns are routed through
-Main, matching the app-server capability contract.
+The upper, borderless pane shows the selected agent's log. A three-row message
+composer sits below it, followed by a horizontal Main/sub-agent bar and the
+selected agent's status, elapsed time, token usage, and full ID. `Esc` enters
+navigation mode; Left/Right select an agent, PageUp/PageDown/Home/End scroll its
+log, and Enter returns to the composer. Up/Down recall message history while
+editing. Mouse selection and wheel scrolling are also supported. Messages for
+sub-agents that reject direct turns are routed through Main, matching the
+app-server capability contract. Agent markers are `●` working, `•` idle,
+`○` closed, and `!` error.
 
 Interactive command, file-change, and permission approvals are shown in the log
 pane with explicit allow/deny keys. Codex user-input questions and MCP

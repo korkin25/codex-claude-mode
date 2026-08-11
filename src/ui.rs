@@ -12,8 +12,11 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::text::Text;
 use ratatui::widgets::Block;
 use ratatui::widgets::Borders;
@@ -49,7 +52,12 @@ pub(crate) struct Workspace {
     pub(crate) scroll: u16,
     pub(crate) status_line: String,
     pub(crate) prompt: Option<ServerPrompt>,
-    tree_area: Rect,
+    input_history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_draft: String,
+    agent_window_start: usize,
+    agent_hitboxes: Vec<(Rect, usize)>,
+    agents_area: Rect,
     log_area: Rect,
     composer_area: Rect,
 }
@@ -66,7 +74,12 @@ impl Workspace {
             scroll: u16::MAX,
             status_line: "connecting to installed Codex…".to_string(),
             prompt: None,
-            tree_area: Rect::default(),
+            input_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
+            agent_window_start: 0,
+            agent_hitboxes: Vec::new(),
+            agents_area: Rect::default(),
             log_area: Rect::default(),
             composer_area: Rect::default(),
         }
@@ -99,9 +112,8 @@ impl Workspace {
             return;
         };
         let selected_id = self.selected_id().map(ToOwned::to_owned);
-        let session_id = self.threads[&root].session_id.clone();
         let mut order = vec![root.clone()];
-        append_children(&mut order, &root, &session_id, &self.threads);
+        append_children(&mut order, &root, &self.threads);
         self.order = order;
         self.root_id = Some(root);
         self.selected = selected_id
@@ -130,23 +142,34 @@ impl Workspace {
                 KeyCode::Esc => self.mode = Mode::Navigation,
                 KeyCode::Enter if !self.input.trim().is_empty() => {
                     let input = std::mem::take(&mut self.input);
+                    if self.input_history.last() != Some(&input) {
+                        self.input_history.push(input.clone());
+                    }
+                    self.history_cursor = None;
+                    self.history_draft.clear();
                     return Action::Submit(input);
                 }
                 KeyCode::Backspace => {
                     self.input.pop();
+                    self.history_cursor = None;
                 }
-                KeyCode::Char(character) => self.input.push(character),
+                KeyCode::Up => self.older_input(),
+                KeyCode::Down => self.newer_input(),
+                KeyCode::Char(character) => {
+                    self.input.push(character);
+                    self.history_cursor = None;
+                }
                 _ => {}
             },
             Mode::Navigation => match key.code {
                 KeyCode::Char('q') => return Action::Quit,
                 KeyCode::Enter | KeyCode::Char('i') => self.mode = Mode::Editing,
-                KeyCode::Up => {
+                KeyCode::Left | KeyCode::Up => {
                     self.selected = self.selected.saturating_sub(1);
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
                 }
-                KeyCode::Down => {
+                KeyCode::Right | KeyCode::Down => {
                     self.selected = (self.selected + 1).min(self.order.len().saturating_sub(1));
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
@@ -168,12 +191,13 @@ impl Workspace {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left)
                 if self
-                    .tree_area
+                    .agents_area
                     .contains(ratatui::layout::Position::new(event.column, event.row)) =>
             {
-                let row = event.row.saturating_sub(self.tree_area.y + 1) as usize;
-                if row < self.order.len() {
-                    self.selected = row;
+                if let Some((_, index)) = self.agent_hitboxes.iter().find(|(area, _)| {
+                    area.contains(ratatui::layout::Position::new(event.column, event.row))
+                }) {
+                    self.selected = *index;
                     self.mode = Mode::Navigation;
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
@@ -210,69 +234,20 @@ impl Workspace {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(3)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
             .split(frame.area());
-        let upper = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(outer[0]);
-        self.tree_area = upper[0];
         self.composer_area = outer[1];
-
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(3)])
-            .split(upper[1]);
-        self.log_area = right[1];
-
-        let tree = self
-            .order
-            .iter()
-            .enumerate()
-            .filter_map(|(index, id)| self.threads.get(id).map(|thread| (index, thread)))
-            .map(|(index, thread)| {
-                let depth = depth(thread, &self.threads);
-                let marker = if index == self.selected { "›" } else { " " };
-                let dot = match thread.status.as_str() {
-                    "working" => "●".green(),
-                    "error" => "●".red(),
-                    "closed" => "○".dark_gray(),
-                    _ => "●".yellow(),
-                };
-                Line::from(vec![
-                    format!("{marker} {}", "  ".repeat(depth)).into(),
-                    dot,
-                    " ".into(),
-                    thread.label.clone().into(),
-                ])
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(tree).block(Block::new().borders(Borders::ALL).title(" Agents ")),
-            self.tree_area,
-        );
+        let footer = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+            .split(outer[2]);
+        self.agents_area = footer[0];
 
         let selected = self.selected_thread();
-        let metrics = selected.map_or_else(
-            || self.status_line.clone(),
-            |thread| {
-                let elapsed = format_duration(thread.elapsed());
-                format!(
-                    " {} · {} · in {} / out {} / total {} · {} ",
-                    thread.status,
-                    elapsed,
-                    thread.tokens.input,
-                    thread.tokens.output,
-                    thread.tokens.total,
-                    thread.id
-                )
-            },
-        );
-        frame.render_widget(
-            Paragraph::new(metrics).block(Block::new().borders(Borders::ALL).title(" Activity ")),
-            right[0],
-        );
-
         let log = self.prompt.as_ref().map_or_else(
             || {
                 selected
@@ -282,8 +257,23 @@ impl Workspace {
             },
             ServerPrompt::body,
         );
-        let visible_height = self.log_area.height.saturating_sub(2);
-        let line_count = textwrap::wrap(&log, self.log_area.width.saturating_sub(2) as usize)
+        let log_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(outer[0]);
+        let header = self.prompt.as_ref().map_or_else(
+            || {
+                selected.map_or_else(
+                    || self.status_line.clone(),
+                    |thread| format!("{}  ·  {}", thread.label, thread.status),
+                )
+            },
+            |_| "Action required".to_string(),
+        );
+        frame.render_widget(Paragraph::new(header.cyan().bold()), log_layout[0]);
+        self.log_area = log_layout[1];
+        let visible_height = self.log_area.height;
+        let line_count = textwrap::wrap(&log, self.log_area.width.max(1) as usize)
             .len()
             .min(u16::MAX as usize) as u16;
         let max_scroll = line_count.saturating_sub(visible_height);
@@ -291,23 +281,14 @@ impl Workspace {
         frame.render_widget(
             Paragraph::new(Text::raw(log))
                 .wrap(Wrap { trim: false })
-                .scroll((scroll, 0))
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title(if self.prompt.is_some() {
-                            " Action required "
-                        } else {
-                            " Agent log "
-                        }),
-                ),
+                .scroll((scroll, 0)),
             self.log_area,
         );
 
         let title = self.prompt.as_ref().map_or_else(
             || match self.mode {
-                Mode::Editing => " Message · Esc navigation ",
-                Mode::Navigation => " Navigation · Enter message · q quit ",
+                Mode::Editing => " Message · ↑/↓ history · Esc agents ",
+                Mode::Navigation => " Message · Enter edit ",
             },
             ServerPrompt::composer_title,
         );
@@ -317,9 +298,17 @@ impl Workspace {
             self.input.clone()
         };
         frame.render_widget(
-            Paragraph::new(displayed_input).block(Block::new().borders(Borders::ALL).title(title)),
+            Paragraph::new(displayed_input).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title(title),
+            ),
             self.composer_area,
         );
+
+        self.render_agent_bar(frame);
+        self.render_metrics(frame, footer[1]);
         let show_cursor = self
             .prompt
             .as_ref()
@@ -335,6 +324,100 @@ impl Workspace {
         }
     }
 
+    fn render_agent_bar(&mut self, frame: &mut Frame) {
+        let entries = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                self.threads.get(id).map(|thread| {
+                    format!(
+                        " {} {} {} ",
+                        thread.label,
+                        status_marker(&thread.status),
+                        short_id(&thread.id)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let available = self.agents_area.width.saturating_sub(2) as usize;
+        if self.selected < self.agent_window_start {
+            self.agent_window_start = self.selected;
+        }
+        while self.agent_window_start < self.selected
+            && entries[self.agent_window_start..=self.selected]
+                .iter()
+                .map(|entry| entry.chars().count() + 1)
+                .sum::<usize>()
+                > available
+        {
+            self.agent_window_start += 1;
+        }
+
+        self.agent_hitboxes.clear();
+        let mut spans = Vec::new();
+        let mut used = 0;
+        for (index, entry) in entries.iter().enumerate().skip(self.agent_window_start) {
+            let width = entry.chars().count();
+            if used + width > available {
+                break;
+            }
+            let style = if index == self.selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(Color::Rgb(28, 35, 42))
+                    .bold()
+            } else {
+                agent_status_style(self.threads[&self.order[index]].status.as_str())
+            };
+            spans.push(Span::styled(entry.clone(), style));
+            self.agent_hitboxes.push((
+                Rect::new(
+                    self.agents_area.x + 1 + used as u16,
+                    self.agents_area.y + 1,
+                    width as u16,
+                    1,
+                ),
+                index,
+            ));
+            used += width;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title(" Agents · ←/→ select "),
+            ),
+            self.agents_area,
+        );
+    }
+
+    fn render_metrics(&self, frame: &mut Frame, area: Rect) {
+        let metrics = self.selected_thread().map_or_else(
+            || self.status_line.clone(),
+            |thread| {
+                format!(
+                    "{} · {} · in {} out {} total {} · {}",
+                    thread.status,
+                    format_duration(thread.elapsed()),
+                    thread.tokens.input,
+                    thread.tokens.output,
+                    thread.tokens.total,
+                    thread.id
+                )
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(metrics).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title(" Activity "),
+            ),
+            area,
+        );
+    }
+
     pub(crate) fn set_prompt(&mut self, prompt: ServerPrompt) -> Result<(), Box<ServerPrompt>> {
         if self.prompt.is_some() {
             return Err(Box::new(prompt));
@@ -342,6 +425,34 @@ impl Workspace {
         self.input.clear();
         self.prompt = Some(prompt);
         Ok(())
+    }
+
+    fn older_input(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        let index = match self.history_cursor {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft.clone_from(&self.input);
+                self.input_history.len() - 1
+            }
+        };
+        self.history_cursor = Some(index);
+        self.input.clone_from(&self.input_history[index]);
+    }
+
+    fn newer_input(&mut self) {
+        let Some(index) = self.history_cursor else {
+            return;
+        };
+        if index + 1 < self.input_history.len() {
+            self.history_cursor = Some(index + 1);
+            self.input.clone_from(&self.input_history[index + 1]);
+        } else {
+            self.history_cursor = None;
+            self.input.clone_from(&self.history_draft);
+        }
     }
 
     pub(crate) fn clear_prompt(&mut self, request_id: &serde_json::Value) {
@@ -356,35 +467,48 @@ impl Workspace {
     }
 }
 
-fn append_children(
-    order: &mut Vec<String>,
-    parent: &str,
-    session_id: &str,
-    threads: &HashMap<String, AgentThread>,
-) {
+fn append_children(order: &mut Vec<String>, parent: &str, threads: &HashMap<String, AgentThread>) {
     let mut children = threads
         .values()
-        .filter(|thread| {
-            thread.session_id == session_id && thread.parent_id.as_deref() == Some(parent)
-        })
+        .filter(|thread| thread.parent_id.as_deref() == Some(parent))
         .collect::<Vec<_>>();
     children.sort_by_key(|thread| thread.updated_at);
     for child in children {
         order.push(child.id.clone());
-        append_children(order, &child.id, session_id, threads);
+        append_children(order, &child.id, threads);
     }
 }
 
-fn depth(thread: &AgentThread, threads: &HashMap<String, AgentThread>) -> usize {
-    let mut depth = 0;
-    let mut parent = thread.parent_id.as_deref();
-    while let Some(parent_id) = parent {
-        depth += 1;
-        parent = threads
-            .get(parent_id)
-            .and_then(|thread| thread.parent_id.as_deref());
+fn short_id(id: &str) -> String {
+    let characters = id.chars().collect::<Vec<_>>();
+    if characters.len() <= 10 {
+        return id.to_string();
     }
-    depth.min(4)
+    format!(
+        "{}…{}",
+        characters[..4].iter().collect::<String>(),
+        characters[characters.len() - 4..]
+            .iter()
+            .collect::<String>()
+    )
+}
+
+fn agent_status_style(status: &str) -> Style {
+    match status {
+        "working" => Style::default().fg(Color::Green),
+        "error" => Style::default().fg(Color::Red),
+        "closed" => Style::default().fg(Color::DarkGray),
+        _ => Style::default().fg(Color::Yellow),
+    }
+}
+
+fn status_marker(status: &str) -> &'static str {
+    match status {
+        "working" => "●",
+        "closed" => "○",
+        "error" => "!",
+        _ => "•",
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
