@@ -28,13 +28,15 @@ log, and Enter returns to the composer. Up/Down recall message history while
 editing. Starting to type in navigation mode enters the composer without
 dropping the first character. Mouse selection and wheel scrolling are also
 supported. Messages for sub-agents that reject direct turns are routed through
-Main, matching the app-server capability contract. Agent markers are `●`
+Main, matching the app-server capability contract, but Main's transport
+messages and service events never appear in the selected agent's log. Agent
+replies are shown without an `Assistant:` wrapper. Agent markers are `●`
 working, `•` idle, `○` closed, and `!` error.
 
 Agent logs are prefetched once and switching uses the in-memory cache without a
 new `thread/read`. Agents stay ordered by creation time. When an older Codex
 backend requires a sub-agent message to travel through Main, the transport turn
-is displayed only in the addressed sub-agent log and is hidden from Main.
+is hidden while the selected sub-agent's own answer appears in its log.
 
 Interactive command, file-change, and permission approvals are shown in the log
 pane with explicit allow/deny keys. Codex user-input questions and MCP

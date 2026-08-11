@@ -273,7 +273,7 @@ impl Workspace {
             || {
                 selected.map_or_else(
                     || self.status_line.clone(),
-                    |thread| format!("{}  ·  {}", thread.label, thread.status),
+                    |thread| format!("{}  ·  {}", thread.label, thread.display_status()),
                 )
             },
             |_| "Action required".to_string(),
@@ -403,7 +403,7 @@ impl Workspace {
             |thread| {
                 format!(
                     "{} · {} · in {} out {} total {} · {}",
-                    thread.status,
+                    thread.display_status(),
                     format_duration(thread.elapsed()),
                     thread.tokens.input,
                     thread.tokens.output,

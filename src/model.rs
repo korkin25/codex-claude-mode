@@ -27,6 +27,7 @@ pub(crate) struct AgentThread {
     pub(crate) tokens: TokenUsage,
     pub(crate) active_since: Option<Instant>,
     pub(crate) active_turn_id: Option<String>,
+    activity: Option<String>,
     live_items: HashMap<String, usize>,
 }
 
@@ -48,6 +49,11 @@ impl AgentThread {
         };
         let status = status_name(value.get("status"));
         let active_since = (status == "working").then(Instant::now);
+        let created_at = value
+            .get("createdAt")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let is_subagent = parent_id.is_some();
         Some(Self {
             id,
             parent_id,
@@ -58,18 +64,16 @@ impl AgentThread {
                 .get("canAcceptDirectInput")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            created_at: value
-                .get("createdAt")
-                .and_then(Value::as_i64)
-                .unwrap_or_default(),
+            created_at,
             updated_at: value
                 .get("updatedAt")
                 .and_then(Value::as_i64)
                 .unwrap_or_default(),
-            log: transcript(value),
+            log: transcript(value, is_subagent, created_at),
             tokens: TokenUsage::default(),
             active_since,
             active_turn_id: active_turn_id(value),
+            activity: None,
             live_items: HashMap::new(),
         })
     }
@@ -101,6 +105,7 @@ impl AgentThread {
             self.active_since = Some(Instant::now());
         } else if status != "working" {
             self.active_since = None;
+            self.activity = None;
         }
         self.status = status;
     }
@@ -120,12 +125,27 @@ impl AgentThread {
             .map_or(Duration::ZERO, |start| start.elapsed())
     }
 
+    pub(crate) fn display_status(&self) -> String {
+        self.activity.as_ref().map_or_else(
+            || self.status.clone(),
+            |activity| format!("{} · {activity}", self.status),
+        )
+    }
+
+    pub(crate) fn update_activity(&mut self, item: &Value) {
+        self.activity = activity_name(item);
+    }
+
     pub(crate) fn append_delta(&mut self, item_id: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.activity = Some("responding".to_string());
         let index = *self
             .live_items
             .entry(item_id.to_string())
             .or_insert_with(|| {
-                self.log.push("Assistant: ".to_string());
+                self.log.push(String::new());
                 self.log.len() - 1
             });
         self.log[index].push_str(delta);
@@ -159,13 +179,20 @@ pub(crate) fn status_name(value: Option<&Value>) -> String {
     .to_string()
 }
 
-fn transcript(thread: &Value) -> Vec<String> {
+fn transcript(thread: &Value, is_subagent: bool, created_at: i64) -> Vec<String> {
     thread
         .get("turns")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|turn| !is_routed_transport_turn(turn))
+        .filter(|turn| {
+            !(is_routed_transport_turn(turn)
+                || is_subagent
+                    && turn
+                        .get("startedAt")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|started_at| started_at < created_at))
+        })
         .flat_map(|turn| {
             turn.get("items")
                 .and_then(Value::as_array)
@@ -182,8 +209,8 @@ pub(crate) fn render_item(item: &Value) -> Option<String> {
             let text = user_message_text(item)?;
             Some(format!("You: {text}"))
         }
-        "agentMessage" => Some(format!("Assistant: {}", string(item, "text")?)),
-        "reasoning" => Some(format!("Thinking: {}", strings(item, "summary").join("\n"))),
+        "agentMessage" => nonempty_string(item, "text"),
+        "reasoning" | "collabAgentToolCall" | "subAgentActivity" => None,
         "commandExecution" => {
             let command = string(item, "command")?;
             let status = string(item, "status").unwrap_or_default();
@@ -191,16 +218,27 @@ pub(crate) fn render_item(item: &Value) -> Option<String> {
             Some(format!("Command [{status}]: {command}\n{output}"))
         }
         "fileChange" => Some("File changes applied".to_string()),
-        "collabAgentToolCall" => Some(format!(
-            "Agent action: {}",
-            item.get("tool").map_or_else(String::new, Value::to_string)
-        )),
-        "subAgentActivity" => Some(format!(
-            "Sub-agent activity: {}",
-            string(item, "kind").unwrap_or_default()
-        )),
         "plan" => Some(format!("Plan: {}", string(item, "text")?)),
-        other => Some(format!("{other}: completed")),
+        _ => None,
+    }
+}
+
+fn activity_name(item: &Value) -> Option<String> {
+    match item.get("type")?.as_str()? {
+        "reasoning" => Some("thinking".to_string()),
+        "collabAgentToolCall" => {
+            let tool = item.get("tool")?;
+            let name = tool
+                .as_str()
+                .map_or_else(|| tool.to_string(), str::to_string);
+            Some(format!("agent action: {name}"))
+        }
+        "subAgentActivity" => Some(format!(
+            "sub-agent: {}",
+            string(item, "kind").unwrap_or_else(|| "active".to_string())
+        )),
+        "agentMessage" => Some("responding".to_string()),
+        _ => None,
     }
 }
 
@@ -230,14 +268,8 @@ fn string(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(ToOwned::to_owned)
 }
 
-fn strings<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect()
+fn nonempty_string(value: &Value, key: &str) -> Option<String> {
+    string(value, key).filter(|text| !text.trim().is_empty())
 }
 
 fn short_id(id: &str) -> String {

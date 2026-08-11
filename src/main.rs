@@ -504,7 +504,7 @@ impl App {
             (
                 root_id,
                 format!(
-                    "{ROUTED_MESSAGE_PREFIX}{selected_label} ({selected_id}). Передай ему это сообщение через средство связи с субагентом и покажи его ответ в его потоке:\n\n{text}"
+                    "{ROUTED_MESSAGE_PREFIX}{selected_label} ({selected_id}). Передай ему только следующее сообщение через средство связи с субагентом. Не отвечай сам, не пересказывай ответ и не сообщай о передаче; субагент должен ответить пользователю непосредственно в своём потоке:\n\n{text}"
                 ),
                 Some(selected_id),
             )
@@ -541,6 +541,9 @@ impl App {
         if let Some(display_target_id) = &display_target_id {
             self.display_routes
                 .begin(thread_id, display_target_id.clone());
+            if let Some(thread) = self.workspace.threads.get_mut(display_target_id) {
+                thread.set_status("working".to_string());
+            }
         }
         let id = self.backend.request(
             "turn/start",
@@ -635,6 +638,13 @@ impl App {
                 }
             }
             "item/agentMessage/delta" => {
+                let source_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if self.display_routes.is_routed(source_id) {
+                    return Ok(());
+                }
                 let item_id = params
                     .get("itemId")
                     .and_then(Value::as_str)
@@ -643,19 +653,22 @@ impl App {
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(thread) = self.notification_log_thread_mut(params) {
+                if let Some(thread) = self.notification_thread_mut(params) {
                     thread.append_delta(item_id, delta);
                 }
             }
             "item/started" | "item/completed" => {
                 let item = params.get("item").unwrap_or(&Value::Null).clone();
-                let routed_user_message = params
+                let source_id = params
                     .get("threadId")
                     .and_then(Value::as_str)
-                    .is_some_and(|thread_id| self.display_routes.is_routed(thread_id))
-                    && item.get("type").and_then(Value::as_str) == Some("userMessage");
-                if !routed_user_message
-                    && let Some(thread) = self.notification_log_thread_mut(params)
+                    .unwrap_or_default();
+                let display_id = self.display_routes.target(source_id).to_string();
+                if let Some(thread) = self.workspace.threads.get_mut(&display_id) {
+                    thread.update_activity(&item);
+                }
+                if !self.display_routes.is_routed(source_id)
+                    && let Some(thread) = self.notification_thread_mut(params)
                 {
                     thread.complete_item(&item);
                 }
@@ -668,12 +681,6 @@ impl App {
     fn notification_thread_mut(&mut self, params: &Value) -> Option<&mut AgentThread> {
         let thread_id = params.get("threadId")?.as_str()?;
         self.workspace.threads.get_mut(thread_id)
-    }
-
-    fn notification_log_thread_mut(&mut self, params: &Value) -> Option<&mut AgentThread> {
-        let source_id = params.get("threadId")?.as_str()?;
-        let display_id = self.display_routes.target(source_id).to_string();
-        self.workspace.threads.get_mut(&display_id)
     }
 
     fn start_notified_turn(&mut self, params: &Value) {
@@ -699,6 +706,12 @@ impl App {
             thread.complete_turn();
         }
         if let Some(source_id) = source_id {
+            let display_id = self.display_routes.target(&source_id).to_string();
+            if display_id != source_id
+                && let Some(thread) = self.workspace.threads.get_mut(&display_id)
+            {
+                thread.complete_turn();
+            }
             self.display_routes.end(&source_id);
         }
     }

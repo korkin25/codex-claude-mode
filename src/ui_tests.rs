@@ -131,7 +131,8 @@ fn workspace_renders_log_above_composer_and_horizontal_agents() {
         });
 
     assert_eq!(buffer[(0, 0)].symbol(), "M");
-    assert!(contents.contains("Assistant: main log"));
+    assert!(contents.contains("main log"));
+    assert!(!contents.contains("Assistant:"));
     assert!(contents.contains("Message · ↑/↓ history"));
     assert!(contents.contains("Main • 0190…main"));
     assert!(contents.contains("worker ● 0190…hild"));
