@@ -96,6 +96,25 @@ evidence релиза.
   unverified and `G0` stays open.
 - Size: `M`
 
+### CCM-CI-001 — Run the baseline CI and capture platform artifacts
+
+- Repo owner: `CCM`
+- Status: `in-progress`
+- Phase: `P0`
+- Depends on: `SHARED-PLATFORM-001`
+- Outcome: каждый push и pull request проверяет direct-mode baseline на Linux
+  x86_64 и macOS ARM64 закреплённым Rust 1.95.0 и сохраняет именованный
+  release-бинарник без публикации GitHub Release.
+- Acceptance: обязательные Linux `fmt`, tests, Clippy и release build проходят;
+  `macos-14` выполняет те же проверки и явно подтверждает `arm64`; артефакты
+  имеют OS/architecture в имени и SHA-256; workflow не использует GNU-only
+  shell assumptions.
+- Evidence: `.github/workflows/ci.yml`; локально на Linux x86_64 с Rust 1.95.0
+  проходят `cargo fmt --all -- --check`, 72 tests,
+  `cargo clippy --locked --all-targets -- -D warnings` и locked release build.
+  macOS evidence появится только после успешного GitHub Actions run.
+- Size: `S`
+
 ## P1 — Shared protocol contract
 
 ### SHARED-PROTO-001 — Specify bounded versioned envelopes

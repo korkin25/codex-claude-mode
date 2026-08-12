@@ -23,7 +23,7 @@ support evidence.
 
 | Capability | Linux x86_64 | Linux ARM64 | macOS x86_64 | macOS ARM64 | Current boundary or gap |
 |---|---|---|---|---|---|
-| Rust build, unit tests and Clippy | **Tested** with Rust 1.95.0: 72 tests | **Expected** | **Expected** | **Expected** | No committed CI matrix or non-x86_64 evidence. |
+| Rust build, unit tests and Clippy | **Tested** with Rust 1.95.0: 72 tests | **Expected** | **Expected** | **Expected** | `CCM-CI-001` adds mandatory Linux x86_64 and macOS ARM64 jobs; macOS remains expected until that job succeeds. |
 | Release packaging | **Tested** only as historical `0.4.7` artifact; not reproducible from a tag | **Unverified** | **Unverified** | **Unverified** | Checksums exist only for Linux x86_64. No signing or provenance. |
 | Direct Codex process and app-server JSONL | **Unverified** end to end | **Unverified** | **Unverified** | **Unverified** | Unit tests validate parsing/projections, not a supported Codex-version runtime matrix. Codex CLI availability is an external prerequisite. |
 | TUI raw mode, alternate screen, keyboard and mouse | **Unverified** manually | **Unverified** | **Expected** | **Expected** | Crossterm is portable, but panic/signal/child-exit restoration is not guarded or tested. Terminal behavior varies by emulator. |
@@ -66,14 +66,16 @@ following assumptions still prevent a first-class macOS support claim:
 
 ## Required CI jobs
 
-The following jobs are the minimum gate for claiming source support. They are a
-plan, not evidence that CI exists.
+The following jobs are the minimum gate for claiming source support. The first
+two are implemented by `.github/workflows/ci.yml`; a committed workflow is not
+runtime evidence until its named job succeeds.
 
 1. `linux-x86_64-rust` on a pinned Ubuntu runner and Rust 1.95.0:
    `cargo fmt --all -- --check`, `cargo test`, and
    `cargo clippy --all-targets -- -D warnings`.
-2. `macos-arm64-rust` on a native Apple Silicon runner with the same commands
-   and toolchain.
+2. `macos-arm64-rust` on the `macos-14` runner, with an explicit `uname -m =
+   arm64` assertion, the same commands and toolchain. A runner-label change
+   fails visibly instead of being misreported as ARM64 evidence.
 3. `macos-x86_64-build` on Intel macOS, or a native Intel release runner if the
    project claims runtime support. A cross-build without execution is build
    evidence only.

@@ -60,6 +60,8 @@ Owner: `CCM`. Entry: текущее dirty-состояние сохранено 
 - Инвентаризировать shipped, tested, unverified и planned behavior.
 - Синхронизировать README с фактическим UX.
 - Проверить, разбить и атомарно зафиксировать накопившийся milestone.
+- Запустить обязательный Linux/macOS CI и сохранять release-бинарники как CI
+  artifacts (`CCM-CI-001`).
 
 `G0`: чистая воспроизводимая baseline-сборка; тесты и release evidence сохранены;
 известные macOS gaps перечислены. Stop gate: нельзя маркировать `0.4.7` готовой

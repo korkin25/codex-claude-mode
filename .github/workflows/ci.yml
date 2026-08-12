@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust 1.95 · ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact: linux-x86_64
+            expected_arch: x86_64
+          - runner: macos-14
+            artifact: macos-arm64
+            expected_arch: arm64
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+
+      - name: Select pinned Rust toolchain
+        run: rustup override set 1.95.0
+
+      - name: Cache Cargo inputs and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-1.95.0-
+
+      - name: Record and verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          actual_arch="$(uname -m)"
+          printf 'runner_os=%s\nrunner_arch=%s\nrust=%s\n' \
+            "${RUNNER_OS}" "${actual_arch}" "$(rustc --version)"
+          test "${actual_arch}" = "${EXPECTED_ARCH}"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Stage release artifact
+        env:
+          ARTIFACT_NAME: codex-claude-mode-${{ matrix.artifact }}
+        run: |
+          mkdir -p "artifacts/${ARTIFACT_NAME}"
+          cp target/release/codex-claude-mode "artifacts/${ARTIFACT_NAME}/codex-claude-mode"
+          "artifacts/${ARTIFACT_NAME}/codex-claude-mode" --version
+          shasum -a 256 "artifacts/${ARTIFACT_NAME}/codex-claude-mode" > "artifacts/${ARTIFACT_NAME}/SHA256SUMS"
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-claude-mode-${{ matrix.artifact }}
+          path: artifacts/codex-claude-mode-${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
