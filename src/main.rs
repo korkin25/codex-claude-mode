@@ -1,15 +1,27 @@
 mod backend;
+mod command;
+mod editor;
 mod model;
+mod project_tree;
 mod prompt;
-mod routing;
 mod session;
+mod shell_completion;
 mod ui;
+mod version;
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -27,17 +39,17 @@ use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
+use editor::ExternalEditor;
 use model::AgentThread;
-use model::ROUTED_MESSAGE_PREFIX;
 use prompt::PromptResolution;
 use prompt::ServerPrompt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use routing::DisplayRoutes;
 use serde_json::Value;
 use serde_json::json;
 use session::candidates_from_list;
 use ui::Action;
+use ui::PermissionChoice;
 use ui::Workspace;
 
 const SOURCE_KINDS: &[&str] = &[
@@ -54,13 +66,13 @@ const SOURCE_KINDS: &[&str] = &[
 ];
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, disable_help_flag = true)]
 struct Args {
     /// Installed Codex executable to use as the backend.
     #[arg(long, env = "CODEX_BIN", default_value = "codex")]
     codex: PathBuf,
 
-    /// Persistent test home used by the installed Codex backend.
+    /// Codex home used by the installed backend.
     #[arg(long, env = "CODEX_HOME")]
     codex_home: Option<PathBuf>,
 
@@ -75,6 +87,10 @@ struct Args {
     /// Verify protocol compatibility without opening the TUI.
     #[arg(long)]
     check_backend: bool,
+
+    /// Show wrapper options followed by the installed Codex help.
+    #[arg(long = "help", short = 'h', action = clap::ArgAction::SetTrue)]
+    combined_help: bool,
 }
 
 #[derive(Debug)]
@@ -87,13 +103,16 @@ enum Pending {
     ResumeAndSend {
         target_id: String,
         text: String,
-        display_target_id: Option<String>,
     },
-    Turn {
-        source_id: String,
-        display_target_id: Option<String>,
-    },
+    Turn,
     Interrupt,
+    Command(String),
+    Skills,
+    Permissions {
+        target_id: String,
+        requested: Option<String>,
+    },
+    PermissionUpdate,
 }
 
 struct App {
@@ -101,45 +120,123 @@ struct App {
     workspace: Workspace,
     pending: HashMap<u64, Pending>,
     loaded_history: HashSet<String>,
-    display_routes: DisplayRoutes,
+    live_items: HashMap<(String, String), Value>,
     preferred_root: Option<String>,
     session_decided: bool,
     starting_new_session: bool,
     cwd: PathBuf,
     last_refresh: Instant,
+    permission_profiles: HashMap<String, String>,
+    codex: PathBuf,
+    codex_home: PathBuf,
+    update_result: Option<Receiver<std::result::Result<String, String>>>,
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let (wrapper_args, codex_args) = split_args(env::args_os());
+    let args = Args::parse_from(wrapper_args);
+    if args.combined_help {
+        print_combined_help(&args.codex)?;
+        return Ok(());
+    }
     let codex_home = args.codex_home.unwrap_or_else(default_codex_home);
     let cwd = args
         .cwd
         .unwrap_or(env::current_dir().context("failed to read cwd")?);
-    let mut backend = Backend::spawn(&args.codex, &codex_home)?;
+    let codex_version = version::read(&args.codex, &codex_home);
+    let mut backend = Backend::spawn(&args.codex, &codex_home, &codex_args)?;
     if args.check_backend {
         return check_backend(&mut backend, &args.codex, &codex_home, &cwd);
     }
     let initialize_id = backend.initialize()?;
+    let mut workspace = Workspace::new();
+    workspace.set_completion_cwd(cwd.clone());
+    workspace.set_codex_versions(codex_version.current, codex_version.latest);
     let mut app = App {
         backend,
-        workspace: Workspace::new(),
+        workspace,
         pending: HashMap::from([(initialize_id, Pending::Initialize)]),
         loaded_history: HashSet::new(),
-        display_routes: DisplayRoutes::default(),
+        live_items: HashMap::new(),
         session_decided: args.thread.is_some(),
         starting_new_session: false,
         preferred_root: args.thread,
         cwd,
         last_refresh: Instant::now(),
+        permission_profiles: HashMap::new(),
+        codex: args.codex,
+        codex_home,
+        update_result: None,
     };
     run_terminal(&mut app)
 }
 
+fn split_args(args: impl IntoIterator<Item = OsString>) -> (Vec<OsString>, Vec<OsString>) {
+    let mut args = args.into_iter();
+    let program = args.next().unwrap_or_else(|| "codex-claude-mode".into());
+    let mut wrapper = vec![program];
+    let mut codex = Vec::new();
+    let mut passthrough = false;
+    let mut takes_value = false;
+    for arg in args {
+        if passthrough {
+            codex.push(arg);
+            continue;
+        }
+        if takes_value {
+            wrapper.push(arg);
+            takes_value = false;
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            continue;
+        }
+        let text = arg.to_string_lossy();
+        let wrapper_value = ["--codex", "--codex-home", "--cwd", "--thread"];
+        if wrapper_value.contains(&text.as_ref()) {
+            takes_value = true;
+            wrapper.push(arg);
+        } else if wrapper_value
+            .iter()
+            .any(|name| text.starts_with(&format!("{name}=")))
+            || matches!(
+                text.as_ref(),
+                "--check-backend" | "-h" | "--help" | "-V" | "--version"
+            )
+        {
+            wrapper.push(arg);
+        } else {
+            codex.push(arg);
+        }
+    }
+    (wrapper, codex)
+}
+
+fn print_combined_help(codex: &std::path::Path) -> Result<()> {
+    use clap::CommandFactory;
+
+    Args::command().print_help()?;
+    println!("\n\nInstalled Codex options ({}):\n", codex.display());
+    let status = Command::new(codex)
+        .arg("--help")
+        .status()
+        .with_context(|| format!("failed to run {} --help", codex.display()))?;
+    if !status.success() {
+        anyhow::bail!("{} --help exited with {status}", codex.display());
+    }
+    Ok(())
+}
+
 fn default_codex_home() -> PathBuf {
-    env::var_os("HOME")
+    let home = env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("tmp/codex-agent-picker-test-home")
+        .unwrap_or_else(|| PathBuf::from("."));
+    codex_home_from_home(home)
+}
+
+fn codex_home_from_home(home: PathBuf) -> PathBuf {
+    home.join(".codex")
 }
 
 fn check_backend(
@@ -222,6 +319,7 @@ fn run_event_loop(
         while let Some(event) = app.backend.try_recv() {
             app.handle_backend_event(event)?;
         }
+        app.poll_codex_update();
         if app.session_decided
             && !app.starting_new_session
             && app.last_refresh.elapsed() >= Duration::from_secs(2)
@@ -239,9 +337,8 @@ fn run_event_loop(
         let action = match event::read()? {
             Event::Key(key) => app.workspace.handle_key(key),
             Event::Mouse(mouse) => app.workspace.handle_mouse(mouse),
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {
-                Action::None
-            }
+            Event::Paste(text) => app.workspace.handle_paste(text),
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => Action::None,
         };
         match action {
             Action::Quit => return Ok(()),
@@ -250,12 +347,126 @@ fn run_event_loop(
             Action::ResolvePrompt(resolution) => app.resolve_prompt(resolution)?,
             Action::Interrupt => app.interrupt_selected()?,
             Action::SessionSelected(root_id) => app.select_session(root_id)?,
+            Action::ChooseSession => app.choose_session()?,
+            Action::NewSession => app.select_session(None)?,
+            Action::UpdateCodex => app.start_codex_update(),
+            Action::PermissionSelected {
+                target_id,
+                profile_id,
+            } => app.select_permission(target_id, profile_id)?,
+            Action::OpenTerminalEditor { path, line, column } => {
+                open_external_editor(app, terminal, ExternalEditor::Terminal, &path, line, column)?
+            }
+            Action::OpenVsCode { path, line, column } => {
+                open_external_editor(app, terminal, ExternalEditor::VsCode, &path, line, column)?
+            }
+            Action::OpenCursor { path, line, column } => {
+                open_external_editor(app, terminal, ExternalEditor::Cursor, &path, line, column)?
+            }
             Action::None => {}
         }
     }
 }
 
+fn open_external_editor(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    external_editor: ExternalEditor,
+    requested: &std::path::Path,
+    line: usize,
+    column: usize,
+) -> Result<()> {
+    let project_root = app
+        .workspace
+        .selected_thread()
+        .and_then(|thread| (!thread.cwd.is_empty()).then(|| PathBuf::from(&thread.cwd)))
+        .unwrap_or_else(|| app.cwd.clone());
+    let result = (|| -> Result<()> {
+        let path = editor::resolve_project_file(&project_root, requested)?;
+        let line = u32::try_from(line).context("editor line number is too large")?;
+        let column = u32::try_from(column).context("editor column number is too large")?;
+        let command = editor::command_for(external_editor, &path, Some(line), Some(column))?;
+        if external_editor == ExternalEditor::Terminal {
+            suspend_terminal(terminal)?;
+            let editor_result = editor::run_terminal(&command);
+            let resume_result = resume_terminal(terminal);
+            resume_result?;
+            editor_result?;
+        } else {
+            editor::spawn_gui(&command)?;
+        }
+        Ok(())
+    })();
+    app.workspace.status_line = match result {
+        Ok(()) => format!("opened {}", requested.display()),
+        Err(error) => format!("could not open {}: {error:#}", requested.display()),
+    };
+    Ok(())
+}
+
+fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    if let Err(error) = execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    ) {
+        let _ = enable_raw_mode();
+        return Err(error.into());
+    }
+    if let Err(error) = terminal.show_cursor() {
+        let _ = resume_terminal(terminal);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(())
+}
+
 impl App {
+    fn start_codex_update(&mut self) {
+        if self.update_result.is_some() {
+            return;
+        }
+        let codex = self.codex.clone();
+        let codex_home = self.codex_home.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                version::run_update(&codex, &codex_home).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.update_result = Some(receiver);
+        self.workspace.codex_update_started();
+    }
+
+    fn poll_codex_update(&mut self) {
+        let Some(receiver) = self.update_result.as_ref() else {
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        self.update_result = None;
+        let message = match result {
+            Ok(output) => output,
+            Err(error) => format!("Codex update failed: {error}"),
+        };
+        self.workspace.codex_update_finished(message);
+        let versions = version::read(&self.codex, &self.codex_home);
+        self.workspace
+            .set_codex_versions(versions.current, versions.latest);
+    }
+
     fn handle_backend_event(&mut self, event: BackendEvent) -> Result<()> {
         match event {
             BackendEvent::Message(message) => self.handle_message(message),
@@ -278,7 +489,16 @@ impl App {
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("request");
-            match ServerPrompt::from_request(&message) {
+            let related_item = message
+                .get("params")
+                .and_then(|params| {
+                    let thread_id = params.get("threadId")?.as_str()?;
+                    let item_id = params.get("itemId")?.as_str()?;
+                    self.live_items
+                        .get(&(thread_id.to_string(), item_id.to_string()))
+                })
+                .cloned();
+            match ServerPrompt::from_request_with_item(&message, related_item.as_ref()) {
                 Ok(prompt) => {
                     let thread_id = prompt.thread_id.clone();
                     if let Err(prompt) = self.workspace.set_prompt(prompt) {
@@ -312,13 +532,6 @@ impl App {
                 self.session_decided = false;
                 self.request_list()?;
             }
-            if let Pending::Turn {
-                source_id,
-                display_target_id: Some(_),
-            } = &pending
-            {
-                self.display_routes.end(source_id);
-            }
             self.workspace.status_line = format!("app-server error: {error}");
             return Ok(());
         }
@@ -326,6 +539,9 @@ impl App {
         match pending {
             Pending::Initialize => {
                 self.backend.initialized()?;
+                if let Some(user_agent) = result.get("userAgent").and_then(Value::as_str) {
+                    self.workspace.set_backend_user_agent(user_agent);
+                }
                 self.workspace.status_line = format!(
                     "connected to {}",
                     result
@@ -358,15 +574,20 @@ impl App {
                     self.workspace.status_line = "new Main thread ready".to_string();
                 }
             }
-            Pending::ResumeAndSend {
-                target_id,
-                text,
-                display_target_id,
-            } => self.start_turn(&target_id, &text, display_target_id)?,
-            Pending::Turn { .. } => {}
+            Pending::ResumeAndSend { target_id, text } => self.start_turn(&target_id, &text)?,
+            Pending::Turn => {}
             Pending::Interrupt => {
                 self.workspace.status_line = "turn interrupted".to_string();
             }
+            Pending::Command(label) => {
+                self.workspace.status_line = format!("/{label} completed");
+            }
+            Pending::Skills => self.show_skills(result),
+            Pending::Permissions {
+                target_id,
+                requested,
+            } => self.show_permissions(result, &target_id, requested.as_deref())?,
+            Pending::PermissionUpdate => {}
         }
         Ok(())
     }
@@ -434,6 +655,13 @@ impl App {
             self.workspace.status_line = "creating a new Main thread…".to_string();
             Ok(())
         }
+    }
+
+    fn choose_session(&mut self) -> Result<()> {
+        self.session_decided = false;
+        self.starting_new_session = false;
+        self.workspace.status_line = "loading saved sessions…".to_string();
+        self.request_list()
     }
 
     fn request_descendants(&mut self) -> Result<()> {
@@ -535,6 +763,9 @@ impl App {
     }
 
     fn submit(&mut self, text: String) -> Result<()> {
+        if let Some(command) = command::parse(&text) {
+            return self.run_slash_command(command.name, command.args);
+        }
         let Some(selected) = self.workspace.selected_thread() else {
             return Ok(());
         };
@@ -542,73 +773,259 @@ impl App {
         let selected_label = selected.label.clone();
         let direct = selected.can_accept_direct_input;
         let is_main = selected.parent_id.is_none();
+        if !direct && !is_main {
+            self.workspace.status_line = format!(
+                "{selected_label} is owned by Main and cannot receive private direct input; start a new direct sub-agent with Ctrl-A"
+            );
+            if let Some(thread) = self.workspace.threads.get_mut(&selected_id) {
+                thread.push_activity_message(
+                    "Message not sent: this older parent-owned agent would copy the exchange into Main. Start a direct sub-agent with Ctrl-A instead."
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
         if let Some(thread) = self.workspace.threads.get_mut(&selected_id) {
             thread.push_user_message(text.clone());
         }
-        let (target_id, routed_text, display_target_id) = if direct || is_main {
-            (selected_id, text, None)
-        } else {
-            let Some(root_id) = self.workspace.root_id.clone() else {
-                return Ok(());
-            };
-            (
-                root_id,
-                format!(
-                    "{ROUTED_MESSAGE_PREFIX}{selected_label} ({selected_id}). Передай ему только следующее сообщение через средство связи с субагентом. Не отвечай сам, не пересказывай ответ и не сообщай о передаче; субагент должен ответить пользователю непосредственно в своём потоке:\n\n{text}"
-                ),
-                Some(selected_id),
-            )
-        };
+        let target_id = selected_id;
         let can_send = self
             .workspace
             .threads
             .get(&target_id)
             .is_some_and(|thread| thread.can_accept_direct_input);
         if can_send {
-            self.start_turn(&target_id, &routed_text, display_target_id)
+            self.start_turn(&target_id, &text)
         } else {
             let id = self
                 .backend
                 .request("thread/resume", json!({"threadId": target_id}))?;
-            self.pending.insert(
-                id,
-                Pending::ResumeAndSend {
-                    target_id,
-                    text: routed_text,
-                    display_target_id,
-                },
-            );
+            self.pending
+                .insert(id, Pending::ResumeAndSend { target_id, text });
             Ok(())
         }
     }
 
-    fn start_turn(
-        &mut self,
-        thread_id: &str,
-        text: &str,
-        display_target_id: Option<String>,
-    ) -> Result<()> {
-        if let Some(display_target_id) = &display_target_id {
-            self.display_routes
-                .begin(thread_id, display_target_id.clone());
-            if let Some(thread) = self.workspace.threads.get_mut(display_target_id) {
-                thread.set_status("working".to_string());
+    fn run_slash_command(&mut self, name: &str, args: &str) -> Result<()> {
+        let Some(thread_id) = self.workspace.selected_id().map(ToOwned::to_owned) else {
+            return Ok(());
+        };
+        let (method, params) = match name {
+            "new" | "clear" => return self.select_session(None),
+            "resume" => return self.choose_session(),
+            "skills" => {
+                let id = self.backend.request(
+                    "skills/list",
+                    json!({"cwds": [self.cwd.to_string_lossy()], "forceReload": true}),
+                )?;
+                self.pending.insert(id, Pending::Skills);
+                self.workspace.status_line = "loading skills…".to_string();
+                return Ok(());
             }
+            "status" => {
+                if let Some(thread) = self.workspace.selected_thread() {
+                    self.workspace.status_line = format!(
+                        "{} · {} · tokens {} ({} in / {} out)",
+                        thread.label,
+                        thread.status,
+                        thread.tokens.total,
+                        thread.tokens.input,
+                        thread.tokens.output
+                    );
+                }
+                return Ok(());
+            }
+            "permissions" => {
+                let id = self.backend.request(
+                    "permissionProfile/list",
+                    json!({"cwd": self.cwd.to_string_lossy(), "cursor": null, "limit": null}),
+                )?;
+                self.pending.insert(
+                    id,
+                    Pending::Permissions {
+                        target_id: thread_id,
+                        requested: (!args.is_empty()).then(|| args.to_string()),
+                    },
+                );
+                self.workspace.status_line = "loading permission profiles…".to_string();
+                return Ok(());
+            }
+            "agent" | "subagents" => {
+                self.workspace.status_line =
+                    "use Left/Right or click the agent bar; Ctrl-A selects Main".to_string();
+                return Ok(());
+            }
+            "compact" => ("thread/compact/start", json!({"threadId": thread_id})),
+            "rename" if !args.is_empty() => (
+                "thread/name/set",
+                json!({"threadId": thread_id, "name": args}),
+            ),
+            "fork" => (
+                "thread/fork",
+                json!({"threadId": thread_id, "lastTurnId": null, "beforeTurnId": null, "path": null}),
+            ),
+            "archive" => ("thread/archive", json!({"threadId": thread_id})),
+            "delete" => ("thread/delete", json!({"threadId": thread_id})),
+            "review" => {
+                let prompt = if args.is_empty() {
+                    "Review the current changes and find issues."
+                } else {
+                    args
+                };
+                return self.start_turn(&thread_id, prompt);
+            }
+            "init" => {
+                return self.start_turn(
+                    &thread_id,
+                    "Create an AGENTS.md file with instructions for Codex in this repository.",
+                );
+            }
+            "diff" => return self.start_turn(&thread_id, "Show and explain the current git diff."),
+            "quit" | "exit" => {
+                self.workspace.status_line = "press Ctrl-Q to quit".to_string();
+                return Ok(());
+            }
+            "rename" => {
+                self.workspace.status_line = "usage: /rename <name>".to_string();
+                return Ok(());
+            }
+            _ => {
+                self.workspace.status_line = format!(
+                    "/{name} is a Codex TUI-only command and is not supported by this app-server frontend yet"
+                );
+                return Ok(());
+            }
+        };
+        let id = self.backend.request(method, params)?;
+        self.pending.insert(id, Pending::Command(name.to_string()));
+        self.workspace.status_line = format!("running /{name}…");
+        Ok(())
+    }
+
+    fn show_skills(&mut self, result: &Value) {
+        let names = result
+            .pointer("/data/0/skills")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|skill| {
+                skill
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            })
+            .filter_map(|skill| skill.get("name").and_then(Value::as_str))
+            .map(|name| format!("${name}"))
+            .collect::<Vec<_>>();
+        self.workspace.status_line = if names.is_empty() {
+            "no enabled skills found for this workspace".to_string()
+        } else {
+            format!("skills: {}", names.join("  "))
+        };
+    }
+
+    fn show_permissions(
+        &mut self,
+        result: &Value,
+        target_id: &str,
+        requested: Option<&str>,
+    ) -> Result<()> {
+        let entries = result
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if let Some(requested) = requested {
+            let matching = entries
+                .iter()
+                .find(|profile| profile.get("id").and_then(Value::as_str) == Some(requested));
+            let message = match matching {
+                Some(profile)
+                    if profile
+                        .get("allowed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    self.apply_permission_profile(target_id, requested)?;
+                    return Ok(());
+                }
+                Some(_) => format!("Permission profile {requested} is blocked by requirements."),
+                None => format!(
+                    "Unknown permission profile {requested}. Run /permissions to list profiles."
+                ),
+            };
+            self.workspace.status_line = message.clone();
+            if let Some(thread) = self.workspace.threads.get_mut(target_id) {
+                thread.push_activity_message(message);
+            }
+            self.workspace.scroll = u16::MAX;
+            return Ok(());
         }
+        let choices = entries
+            .into_iter()
+            .filter_map(|profile| {
+                let id = profile.get("id")?.as_str()?;
+                let allowed = profile
+                    .get("allowed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                allowed.then(|| PermissionChoice {
+                    id: id.to_string(),
+                    description: profile
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("permission profile")
+                        .to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            let message = "no allowed permission profiles available".to_string();
+            self.workspace.status_line = message.clone();
+            if let Some(thread) = self.workspace.threads.get_mut(target_id) {
+                thread.push_activity_message(message);
+            }
+            return Ok(());
+        }
+        let current = self.permission_profiles.get(target_id).map(String::as_str);
+        self.workspace
+            .show_permission_picker(target_id.to_string(), choices, current);
+        Ok(())
+    }
+
+    fn select_permission(&mut self, target_id: String, profile_id: String) -> Result<()> {
+        self.apply_permission_profile(&target_id, &profile_id)
+    }
+
+    fn apply_permission_profile(&mut self, target_id: &str, profile_id: &str) -> Result<()> {
+        self.permission_profiles
+            .insert(target_id.to_string(), profile_id.to_string());
+        self.workspace.set_permission_profile(target_id, profile_id);
+        let id = self.backend.request(
+            "thread/settings/update",
+            permission_update_params(target_id, profile_id),
+        )?;
+        self.pending.insert(id, Pending::PermissionUpdate);
+        let message = format!("Permission profile {profile_id} selected for this agent.");
+        self.workspace.status_line = message.clone();
+        if let Some(thread) = self.workspace.threads.get_mut(target_id) {
+            thread.push_activity_message(message);
+        }
+        self.workspace.scroll = u16::MAX;
+        Ok(())
+    }
+
+    fn start_turn(&mut self, thread_id: &str, text: &str) -> Result<()> {
         let id = self.backend.request(
             "turn/start",
-            json!({
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": text, "textElements": []}]
-            }),
+            turn_start_params(
+                thread_id,
+                text,
+                self.permission_profiles.get(thread_id).map(String::as_str),
+            ),
         )?;
-        self.pending.insert(
-            id,
-            Pending::Turn {
-                source_id: thread_id.to_string(),
-                display_target_id,
-            },
-        );
+        self.pending.insert(id, Pending::Turn);
         Ok(())
     }
 
@@ -690,13 +1107,6 @@ impl App {
                 }
             }
             "item/agentMessage/delta" => {
-                let source_id = params
-                    .get("threadId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if self.display_routes.is_routed(source_id) {
-                    return Ok(());
-                }
                 let item_id = params
                     .get("itemId")
                     .and_then(Value::as_str)
@@ -716,14 +1126,39 @@ impl App {
                     .get("threadId")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let display_id = self.display_routes.target(source_id).to_string();
-                if let Some(thread) = self.workspace.threads.get_mut(&display_id) {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                let item_key = (source_id.to_string(), item_id.to_string());
+                if completed {
+                    self.live_items.remove(&item_key);
+                } else if !source_id.is_empty() && !item_id.is_empty() {
+                    self.live_items.insert(item_key, item.clone());
+                }
+                if let Some(thread) = self.workspace.threads.get_mut(source_id) {
                     thread.update_activity(&item);
                 }
-                if !self.display_routes.is_routed(source_id)
-                    && let Some(thread) = self.notification_thread_mut(params)
-                {
+                if let Some(thread) = self.notification_thread_mut(params) {
                     thread.update_item(&item, completed);
+                }
+            }
+            "item/fileChange/patchUpdated" => {
+                let thread_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !thread_id.is_empty() && !item_id.is_empty() {
+                    self.live_items.insert(
+                        (thread_id.to_string(), item_id.to_string()),
+                        json!({
+                            "type": "fileChange",
+                            "id": item_id,
+                            "changes": params.get("changes").cloned().unwrap_or_else(|| json!([])),
+                            "status": "inProgress"
+                        }),
+                    );
                 }
             }
             _ => {}
@@ -751,21 +1186,8 @@ impl App {
     }
 
     fn complete_notified_turn(&mut self, params: &Value) {
-        let source_id = params
-            .get("threadId")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
         if let Some(thread) = self.notification_thread_mut(params) {
             thread.complete_turn();
-        }
-        if let Some(source_id) = source_id {
-            let display_id = self.display_routes.target(&source_id).to_string();
-            if display_id != source_id
-                && let Some(thread) = self.workspace.threads.get_mut(&display_id)
-            {
-                thread.complete_turn();
-            }
-            self.display_routes.end(&source_id);
         }
     }
 }
@@ -778,5 +1200,20 @@ fn list_params(cwd: &std::path::Path) -> Value {
         "sourceKinds": SOURCE_KINDS,
         "archived": false,
         "cwd": cwd.to_string_lossy()
+    })
+}
+
+fn permission_update_params(thread_id: &str, profile_id: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "permissions": profile_id
+    })
+}
+
+fn turn_start_params(thread_id: &str, text: &str, permissions: Option<&str>) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": text, "textElements": []}],
+        "permissions": permissions
     })
 }

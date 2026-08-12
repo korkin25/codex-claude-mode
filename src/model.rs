@@ -70,7 +70,10 @@ impl LogEntry {
 #[derive(Clone, Debug)]
 pub(crate) struct AgentThread {
     pub(crate) id: String,
+    pub(crate) session_id: String,
     pub(crate) parent_id: Option<String>,
+    pub(crate) path: Option<String>,
+    pub(crate) cwd: String,
     pub(crate) label: String,
     pub(crate) preview: String,
     pub(crate) status: String,
@@ -110,7 +113,10 @@ impl AgentThread {
         let is_subagent = parent_id.is_some();
         Some(Self {
             id,
+            session_id: string(value, "sessionId").unwrap_or_default(),
             parent_id,
+            path: string(value, "path"),
+            cwd: string(value, "cwd").unwrap_or_default(),
             label,
             preview: string(value, "preview").unwrap_or_default(),
             status,
@@ -136,6 +142,9 @@ impl AgentThread {
         let replacement = Self::from_json(value);
         if let Some(replacement) = replacement {
             self.parent_id = replacement.parent_id;
+            self.session_id = replacement.session_id;
+            self.path = replacement.path;
+            self.cwd = replacement.cwd;
             self.label = replacement.label;
             self.preview = replacement.preview;
             self.can_accept_direct_input = replacement.can_accept_direct_input;
@@ -299,7 +308,7 @@ pub(crate) fn render_item(item: &Value) -> Option<LogEntry> {
             nonempty_string(item, "text")?,
             LogKind::Agent,
         )),
-        "reasoning" => activity_entry(reasoning_text(item)),
+        "reasoning" => None,
         "commandExecution" => activity_entry(command_text(item)?),
         "fileChange" => activity_entry(file_change_text(item)),
         "mcpToolCall" => activity_entry(tool_text("MCP", item)),
@@ -330,15 +339,6 @@ pub(crate) fn render_item(item: &Value) -> Option<LogEntry> {
 
 fn activity_entry(text: String) -> Option<LogEntry> {
     (!text.trim().is_empty()).then(|| LogEntry::historical(text, LogKind::Activity))
-}
-
-fn reasoning_text(item: &Value) -> String {
-    let summary = string_array(item, "summary").join("\n");
-    if summary.trim().is_empty() {
-        "Thinking".to_string()
-    } else {
-        format!("Thinking: {summary}")
-    }
 }
 
 fn command_text(item: &Value) -> Option<String> {

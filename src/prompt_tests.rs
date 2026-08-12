@@ -19,7 +19,7 @@ fn command_approval_honors_available_decisions() {
             "availableDecisions": ["accept", "decline"]
         }
     });
-    let mut prompt = ServerPrompt::from_request(&message).expect("valid prompt");
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
     let mut input = String::new();
 
     assert!(
@@ -41,6 +41,116 @@ fn command_approval_honors_available_decisions() {
 }
 
 #[test]
+fn approval_default_and_navigation_resolve_the_highlighted_available_choice() {
+    let message = json!({
+        "id": 8,
+        "method": "item/commandExecution/requestApproval",
+        "params": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "command": "cargo test",
+            "availableDecisions": ["accept", "acceptForSession", "decline"]
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    let default = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("default decision");
+    assert_eq!(default.result, json!({"decision": "accept"}));
+
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    assert!(
+        prompt
+            .handle_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &mut String::new()
+            )
+            .is_none()
+    );
+    let selected = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("highlighted decision");
+    assert_eq!(selected.result, json!({"decision": "acceptForSession"}));
+}
+
+#[test]
+fn approval_default_never_selects_an_unavailable_decision() {
+    let message = json!({
+        "id": 9,
+        "method": "item/commandExecution/requestApproval",
+        "params": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "availableDecisions": ["decline", "cancel"]
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    let lines = prompt.decision_lines().expect("decision lines");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.selected && line.text.contains("decline"))
+    );
+    assert!(!lines.iter().any(|line| line.text.contains("approve")));
+
+    let resolution = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("safe available default");
+    assert_eq!(resolution.result, json!({"decision": "decline"}));
+}
+
+#[test]
+fn permission_request_defaults_to_allow_once_and_can_select_deny() {
+    let message = json!({
+        "id": 10,
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "permissions": {"fileSystem": {"write": ["/workspace"]}}
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    let default = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("allow-once default");
+    assert_eq!(default.result["scope"], "turn");
+    assert_eq!(
+        default.result["permissions"],
+        message["params"]["permissions"]
+    );
+
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    prompt.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        &mut String::new(),
+    );
+    prompt.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        &mut String::new(),
+    );
+    let denied = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("deny selection");
+    assert_eq!(denied.result, json!({"permissions": {}, "scope": "turn"}));
+}
+
+#[test]
 fn user_input_collects_all_questions() {
     let message = json!({
         "id": "request",
@@ -56,7 +166,7 @@ fn user_input_collects_all_questions() {
             ]
         }
     });
-    let mut prompt = ServerPrompt::from_request(&message).expect("valid prompt");
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
     let mut input = "alpha".to_string();
     assert!(
         prompt
@@ -92,7 +202,7 @@ fn control_c_cancels_prompt_and_interrupts_turn() {
         "method": "item/fileChange/requestApproval",
         "params": {"threadId": "thread", "turnId": "turn", "itemId": "item"}
     });
-    let mut prompt = ServerPrompt::from_request(&message).expect("valid prompt");
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
     let resolution = prompt
         .handle_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -105,4 +215,43 @@ fn control_c_cancels_prompt_and_interrupts_turn() {
         resolution.interrupt,
         Some(("thread".to_string(), "turn".to_string()))
     );
+}
+
+#[test]
+fn file_change_approval_shows_paths_diff_reason_and_decision_scope() {
+    let message = json!({
+        "id": 12,
+        "method": "item/fileChange/requestApproval",
+        "params": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "itemId": "patch",
+            "reason": "Implement the requested theme",
+            "grantRoot": "/workspace"
+        }
+    });
+    let item = json!({
+        "type": "fileChange",
+        "id": "patch",
+        "changes": [{
+            "path": "src/ui.rs",
+            "kind": {"type": "update", "movePath": null},
+            "diff": "@@ -1 +1 @@\n-old\n+new"
+        }]
+    });
+
+    let prompt = ServerPrompt::from_request_with_item(&message, Some(&item)).expect("valid prompt");
+    let body = prompt.body();
+
+    assert!(body.contains("Reason: Implement the requested theme"));
+    assert!(body.contains("Requested session write root: /workspace"));
+    assert!(body.contains("Files: src/ui.rs"));
+    assert!(!body.contains("@@ -1 +1 @@\n-old\n+new"));
+    let patch = prompt.patch_text().expect("full patch");
+    assert!(patch.contains("update: src/ui.rs"));
+    assert!(patch.contains("@@ -1 +1 @@\n-old\n+new"));
+    assert!(!body.contains("approve once"));
+    let decisions = prompt.decision_text().expect("approval decisions");
+    assert!(decisions.contains("Yes, and don't ask again for these files"));
+    assert!(decisions.contains("[Esc/x] No, and stop"));
 }

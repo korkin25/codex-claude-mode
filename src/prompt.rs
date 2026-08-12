@@ -19,6 +19,12 @@ pub(crate) struct ServerPrompt {
     pub(crate) thread_id: String,
     turn_id: Option<String>,
     kind: PromptKind,
+    selected_decision: usize,
+}
+
+pub(crate) struct DecisionLine {
+    pub(crate) text: String,
+    pub(crate) selected: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +33,8 @@ enum PromptKind {
         title: String,
         details: String,
         decisions: Vec<String>,
+        scope: ApprovalScope,
+        patch: Option<String>,
     },
     Permissions {
         details: String,
@@ -43,6 +51,12 @@ enum PromptKind {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApprovalScope {
+    Command,
+    FileChange,
+}
+
 #[derive(Clone, Debug)]
 struct Question {
     id: String,
@@ -53,7 +67,10 @@ struct Question {
 }
 
 impl ServerPrompt {
-    pub(crate) fn from_request(message: &Value) -> Result<Self, String> {
+    pub(crate) fn from_request_with_item(
+        message: &Value,
+        related_item: Option<&Value>,
+    ) -> Result<Self, String> {
         let request_id = message
             .get("id")
             .cloned()
@@ -72,20 +89,20 @@ impl ServerPrompt {
                 title: "Command approval".to_string(),
                 details: command_details(params),
                 decisions: decisions(params, &["accept", "acceptForSession", "decline", "cancel"]),
+                scope: ApprovalScope::Command,
+                patch: None,
             },
             "item/fileChange/requestApproval" => PromptKind::Approval {
                 title: "File change approval".to_string(),
-                details: detail_lines(
-                    params,
-                    &["reason", "grantRoot", "itemId"],
-                    Some("Codex requests permission to apply file changes."),
-                ),
+                details: file_change_details(params, related_item),
                 decisions: vec![
                     "accept".to_string(),
                     "acceptForSession".to_string(),
                     "decline".to_string(),
                     "cancel".to_string(),
                 ],
+                scope: ApprovalScope::FileChange,
+                patch: file_change_patch(related_item),
             },
             "item/permissions/requestApproval" => PromptKind::Permissions {
                 details: format!(
@@ -122,6 +139,7 @@ impl ServerPrompt {
             thread_id,
             turn_id,
             kind,
+            selected_decision: 0,
         })
     }
 
@@ -130,12 +148,16 @@ impl ServerPrompt {
             PromptKind::Approval {
                 title,
                 details,
-                decisions,
-            } => format!("{title}\n\n{details}\n\n{}", approval_help(decisions)),
+                scope,
+                ..
+            } => match scope {
+                ApprovalScope::FileChange => {
+                    format!("{title}\n\n{details}\n\nPress Ctrl-A to review the full patch.")
+                }
+                ApprovalScope::Command => format!("{title}\n\n{details}"),
+            },
             PromptKind::Permissions { details, .. } => {
-                format!(
-                    "Permission request\n\n{details}\n\n[y] allow once  [a] allow for session  [n] deny  [x] deny and interrupt"
-                )
+                format!("Permission request\n\n{details}")
             }
             PromptKind::UserInput {
                 questions, current, ..
@@ -155,24 +177,85 @@ impl ServerPrompt {
                     options
                 )
             }
-            PromptKind::Elicitation {
-                details,
-                can_accept,
-            } => {
-                let accept = if *can_accept {
-                    "[y] completed/accept  "
-                } else {
-                    ""
-                };
-                format!("MCP elicitation\n\n{details}\n\n{accept}[n] decline  [x] cancel")
+            PromptKind::Elicitation { details, .. } => {
+                format!("MCP elicitation\n\n{details}")
             }
+        }
+    }
+
+    pub(crate) fn decision_text(&self) -> Option<String> {
+        self.decision_lines().map(|lines| {
+            lines
+                .into_iter()
+                .map(|line| line.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    pub(crate) fn decision_lines(&self) -> Option<Vec<DecisionLine>> {
+        let (header, choices, footer) = match &self.kind {
+            PromptKind::Approval {
+                decisions, scope, ..
+            } => (
+                (*scope == ApprovalScope::FileChange)
+                    .then_some("Would you like to make the following edits?"),
+                approval_choices(decisions, *scope),
+                Some(if *scope == ApprovalScope::FileChange {
+                    "Ctrl-A review patch"
+                } else {
+                    "PgUp/PgDn scroll details"
+                }),
+            ),
+            PromptKind::Permissions { .. } => (None, permission_choices(), None),
+            PromptKind::Elicitation { can_accept, .. } => {
+                (None, elicitation_choices(*can_accept), None)
+            }
+            PromptKind::UserInput { .. } => return None,
+        };
+        let mut lines = Vec::new();
+        if let Some(header) = header {
+            lines.push(DecisionLine {
+                text: header.to_string(),
+                selected: false,
+            });
+        }
+        lines.extend(
+            choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (_, label))| DecisionLine {
+                    text: format!(
+                        "{} {label}",
+                        if index == self.selected_decision {
+                            "▶"
+                        } else {
+                            " "
+                        }
+                    ),
+                    selected: index == self.selected_decision,
+                }),
+        );
+        if let Some(footer) = footer {
+            lines.push(DecisionLine {
+                text: footer.to_string(),
+                selected: false,
+            });
+        }
+        Some(lines)
+    }
+
+    pub(crate) fn patch_text(&self) -> Option<&str> {
+        match &self.kind {
+            PromptKind::Approval { patch, .. } => patch.as_deref(),
+            _ => None,
         }
     }
 
     pub(crate) fn composer_title(&self) -> &'static str {
         match &self.kind {
             PromptKind::UserInput { .. } => " Answer required ",
-            _ => " Decision required ",
+            _ => " Approval required ",
         }
     }
 
@@ -197,16 +280,46 @@ impl ServerPrompt {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(self.resolve_and_interrupt(self.cancel_result()));
         }
+        if !self.accepts_text() {
+            let choice_count = self.decision_choices().len();
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.selected_decision = self.selected_decision.saturating_sub(1);
+                    return None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.selected_decision =
+                        (self.selected_decision + 1).min(choice_count.saturating_sub(1));
+                    return None;
+                }
+                _ => {}
+            }
+        }
         let request_id = self.request_id.clone();
         let result = match &mut self.kind {
-            PromptKind::Approval { decisions, .. } => {
-                approval_decision(key, decisions).map(|decision| json!({"decision": decision}))
-            }
+            PromptKind::Approval {
+                decisions, scope, ..
+            } => approval_decision(key, decisions, *scope, self.selected_decision)
+                .map(|decision| json!({"decision": decision})),
             PromptKind::Permissions { requested, .. } => match key.code {
                 KeyCode::Char('y') => Some(json!({"permissions": requested, "scope": "turn"})),
                 KeyCode::Char('a') => Some(json!({"permissions": requested, "scope": "session"})),
                 KeyCode::Char('n') => Some(json!({"permissions": {}, "scope": "turn"})),
                 KeyCode::Char('x') => {
+                    return Some(
+                        self.resolve_and_interrupt(json!({"permissions": {}, "scope": "turn"})),
+                    );
+                }
+                KeyCode::Enter if self.selected_decision == 0 => {
+                    Some(json!({"permissions": requested, "scope": "turn"}))
+                }
+                KeyCode::Enter if self.selected_decision == 1 => {
+                    Some(json!({"permissions": requested, "scope": "session"}))
+                }
+                KeyCode::Enter if self.selected_decision == 2 => {
+                    Some(json!({"permissions": {}, "scope": "turn"}))
+                }
+                KeyCode::Enter if self.selected_decision == 3 => {
                     return Some(
                         self.resolve_and_interrupt(json!({"permissions": {}, "scope": "turn"})),
                     );
@@ -244,6 +357,15 @@ impl ServerPrompt {
                 }
                 KeyCode::Char('n') => Some(json!({"action": "decline", "content": null})),
                 KeyCode::Char('x') => Some(json!({"action": "cancel", "content": null})),
+                KeyCode::Enter if *can_accept && self.selected_decision == 0 => {
+                    Some(json!({"action": "accept", "content": null}))
+                }
+                KeyCode::Enter if self.selected_decision == usize::from(*can_accept) => {
+                    Some(json!({"action": "decline", "content": null}))
+                }
+                KeyCode::Enter if self.selected_decision == usize::from(*can_accept) + 1 => {
+                    Some(json!({"action": "cancel", "content": null}))
+                }
                 _ => None,
             },
         };
@@ -252,6 +374,17 @@ impl ServerPrompt {
             result,
             interrupt: None,
         })
+    }
+
+    fn decision_choices(&self) -> Vec<(&str, &str)> {
+        match &self.kind {
+            PromptKind::Approval {
+                decisions, scope, ..
+            } => approval_choices(decisions, *scope),
+            PromptKind::Permissions { .. } => permission_choices(),
+            PromptKind::Elicitation { can_accept, .. } => elicitation_choices(*can_accept),
+            PromptKind::UserInput { .. } => Vec::new(),
+        }
     }
 
     fn cancel_result(&self) -> Value {
@@ -275,32 +408,85 @@ impl ServerPrompt {
     }
 }
 
-fn approval_decision(key: KeyEvent, decisions: &[String]) -> Option<&'static str> {
+fn approval_decision(
+    key: KeyEvent,
+    decisions: &[String],
+    scope: ApprovalScope,
+    selected: usize,
+) -> Option<String> {
+    if key.code == KeyCode::Enter {
+        return approval_choices(decisions, scope)
+            .get(selected)
+            .map(|(decision, _)| (*decision).to_string());
+    }
     let decision = match key.code {
         KeyCode::Char('y') => "accept",
         KeyCode::Char('a') => "acceptForSession",
         KeyCode::Char('n') => "decline",
         KeyCode::Char('x') => "cancel",
+        KeyCode::Esc if scope == ApprovalScope::FileChange => "cancel",
         _ => return None,
     };
     decisions
         .iter()
         .any(|allowed| allowed == decision)
-        .then_some(decision)
+        .then(|| decision.to_string())
 }
 
-fn approval_help(decisions: &[String]) -> String {
+fn approval_choices(decisions: &[String], scope: ApprovalScope) -> Vec<(&str, &str)> {
+    let accept_for_session = match scope {
+        ApprovalScope::Command => "[a] approve command for session",
+        ApprovalScope::FileChange => "[a] Yes, and don't ask again for these files",
+    };
     [
-        ("accept", "[y] approve once"),
-        ("acceptForSession", "[a] approve for session"),
-        ("decline", "[n] decline"),
-        ("cancel", "[x] decline and interrupt"),
+        (
+            "accept",
+            if scope == ApprovalScope::FileChange {
+                "[y] Yes, proceed"
+            } else {
+                "[y] approve once"
+            },
+        ),
+        ("acceptForSession", accept_for_session),
+        (
+            "decline",
+            if scope == ApprovalScope::FileChange {
+                "[n] No"
+            } else {
+                "[n] decline"
+            },
+        ),
+        (
+            "cancel",
+            if scope == ApprovalScope::FileChange {
+                "[Esc/x] No, and stop"
+            } else {
+                "[x] decline and stop"
+            },
+        ),
     ]
     .into_iter()
     .filter(|(decision, _)| decisions.iter().any(|allowed| allowed == decision))
-    .map(|(_, help)| help)
-    .collect::<Vec<_>>()
-    .join("  ")
+    .collect()
+}
+
+fn permission_choices() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("turn", "[y] allow once"),
+        ("session", "[a] allow for session"),
+        ("deny", "[n] deny"),
+        ("cancel", "[x] deny and stop"),
+    ]
+}
+
+fn elicitation_choices(can_accept: bool) -> Vec<(&'static str, &'static str)> {
+    let mut choices = Vec::new();
+    if can_accept {
+        choices.push(("accept", "[y] accept"));
+    }
+    choices.push(("decline", "[n] decline"));
+    choices.push(("cancel", "[x] cancel"));
+    choices
 }
 
 fn decisions(params: &Value, fallback: &[&str]) -> Vec<String> {
@@ -359,6 +545,62 @@ fn command_details(params: &Value) -> String {
         details.push_str(&bounded_json(permissions));
     }
     details
+}
+
+fn file_change_details(params: &Value, item: Option<&Value>) -> String {
+    let mut sections = Vec::new();
+    if let Some(reason) = text(params, "reason") {
+        sections.push(format!("Reason: {reason}"));
+    }
+    if let Some(grant_root) = text(params, "grantRoot") {
+        sections.push(format!("Requested session write root: {grant_root}"));
+    }
+
+    let paths = item
+        .and_then(|item| item.get("changes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| text(change, "path"))
+        .collect::<Vec<_>>();
+    if !paths.is_empty() {
+        sections.push(format!("Files: {}", paths.join(", ")));
+    }
+    if sections.is_empty() {
+        sections.push(format!(
+            "The backend did not provide paths or a diff for item {}. Decline unless the change is already clear from the activity log.",
+            text(params, "itemId").unwrap_or_else(|| "(unknown)".to_string())
+        ));
+    }
+    sections.join("\n\n")
+}
+
+fn file_change_patch(item: Option<&Value>) -> Option<String> {
+    let rendered = item?
+        .get("changes")?
+        .as_array()?
+        .iter()
+        .filter_map(render_file_change)
+        .collect::<Vec<_>>();
+    (!rendered.is_empty()).then(|| rendered.join("\n\n"))
+}
+
+fn render_file_change(change: &Value) -> Option<String> {
+    let path = text(change, "path")?;
+    let kind = change
+        .get("kind")
+        .and_then(|kind| {
+            kind.as_str()
+                .map(str::to_string)
+                .or_else(|| kind.get("type").and_then(Value::as_str).map(str::to_string))
+        })
+        .unwrap_or_else(|| "update".to_string());
+    let mut rendered = format!("{kind}: {path}");
+    if let Some(diff) = text(change, "diff").filter(|diff| !diff.trim().is_empty()) {
+        rendered.push('\n');
+        rendered.push_str(&diff);
+    }
+    Some(rendered)
 }
 
 fn detail_lines(params: &Value, keys: &[&str], fallback: Option<&str>) -> String {

@@ -111,12 +111,29 @@ fn service_items_are_visible_as_activity_and_update_status() {
     assert_eq!(
         log(&thread),
         vec![
-            (LogKind::Activity, "Thinking: private"),
             (LogKind::Activity, "Sub-agent interacted: /root/worker"),
             (LogKind::Activity, "Agent action [completed]: wait")
         ]
     );
     assert_eq!(thread.display_status(), "working · agent action: wait");
+}
+
+#[test]
+fn reasoning_updates_status_without_adding_a_log_row() {
+    let value = json!({
+        "id": "agent",
+        "parentThreadId": null,
+        "status": {"type": "active"},
+        "turns": []
+    });
+    let mut thread = AgentThread::from_json(&value).expect("valid thread");
+    let reasoning = json!({"type": "reasoning", "summary": ["private"]});
+
+    thread.update_activity(&reasoning);
+    thread.update_item(&reasoning, true);
+
+    assert_eq!(log(&thread), Vec::new());
+    assert_eq!(thread.display_status(), "working · thinking");
 }
 
 #[test]

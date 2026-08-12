@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -22,14 +23,49 @@ use ratatui::text::Span;
 use ratatui::text::Text;
 use ratatui::widgets::Block;
 use ratatui::widgets::Borders;
+use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 
+use crate::command;
 use crate::model::AgentThread;
 use crate::model::LogEntry;
 use crate::model::LogKind;
+use crate::project_tree::{BrowserAction, EditorKind, ProjectBrowser};
 use crate::prompt::PromptResolution;
 use crate::prompt::ServerPrompt;
 use crate::session::SessionCandidate;
+use crate::shell_completion;
+use crate::version;
+
+const APP_BACKGROUND: Color = Color::Rgb(31, 34, 35);
+const SURFACE_BACKGROUND: Color = Color::Rgb(47, 49, 50);
+const SELECTED_BACKGROUND: Color = Color::Rgb(58, 61, 62);
+
+fn count_line_breaks(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut count = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                count += 1;
+                index += 2;
+            }
+            b'\r' | b'\n' => {
+                count += 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    count
+}
+const ACCENT_CYAN: Color = Color::Rgb(27, 181, 190);
+const ACCENT_GREEN: Color = Color::Rgb(63, 185, 128);
+const MUTED_TEXT: Color = Color::Rgb(132, 139, 141);
+const BORDER_MUTED: Color = Color::Rgb(73, 77, 78);
+const APPROVAL_BACKGROUND: Color = Color::Rgb(63, 52, 32);
+const APPROVAL_BORDER: Color = Color::Rgb(224, 170, 70);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -45,12 +81,57 @@ pub(crate) enum Action {
     ResolvePrompt(PromptResolution),
     Interrupt,
     SessionSelected(Option<String>),
+    ChooseSession,
+    NewSession,
+    UpdateCodex,
+    OpenTerminalEditor {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
+    OpenVsCode {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
+    OpenCursor {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
+    PermissionSelected {
+        target_id: String,
+        profile_id: String,
+    },
 }
 
 struct SessionPicker {
     candidates: Vec<SessionCandidate>,
     selected: usize,
     starting_new: bool,
+}
+
+pub(crate) struct PermissionChoice {
+    pub(crate) id: String,
+    pub(crate) description: String,
+}
+
+struct PermissionPicker {
+    target_id: String,
+    choices: Vec<PermissionChoice>,
+    selected: usize,
+}
+
+struct CompletionPopup {
+    start: usize,
+    end: usize,
+    candidates: Vec<String>,
+    selected: usize,
+}
+
+struct PastedText {
+    placeholder: String,
+    text: String,
 }
 
 pub(crate) struct Workspace {
@@ -60,12 +141,27 @@ pub(crate) struct Workspace {
     pub(crate) root_id: Option<String>,
     pub(crate) mode: Mode,
     pub(crate) input: String,
+    input_cursor: Option<usize>,
     pub(crate) scroll: u16,
+    last_max_scroll: u16,
     pub(crate) status_line: String,
+    permission_profiles: HashMap<String, String>,
+    completion_cwd: PathBuf,
+    completion_popup: Option<CompletionPopup>,
+    backend_user_agent: Option<String>,
+    codex_current_version: Option<String>,
+    codex_latest_version: Option<String>,
+    codex_update_confirm: bool,
+    codex_update_running: bool,
+    codex_update_result: Option<String>,
     pub(crate) prompt: Option<ServerPrompt>,
+    prompt_draft: Option<String>,
+    prompt_draft_cursor: Option<usize>,
     input_history: Vec<String>,
     history_cursor: Option<usize>,
     history_draft: String,
+    pasted_texts: Vec<PastedText>,
+    next_paste_number: usize,
     agent_window_start: usize,
     agent_hitboxes: Vec<(Rect, usize)>,
     agents_area: Rect,
@@ -73,6 +169,15 @@ pub(crate) struct Workspace {
     composer_area: Rect,
     session_picker: Option<SessionPicker>,
     session_hitboxes: Vec<(Rect, usize)>,
+    quit_armed: bool,
+    info_open: bool,
+    info_scroll: u16,
+    slash_selected: usize,
+    permission_picker: Option<PermissionPicker>,
+    suspended_permission_picker: Option<PermissionPicker>,
+    patch_open: bool,
+    patch_scroll: u16,
+    project_browser: Option<ProjectBrowser>,
 }
 
 impl Workspace {
@@ -84,12 +189,27 @@ impl Workspace {
             root_id: None,
             mode: Mode::Editing,
             input: String::new(),
+            input_cursor: None,
             scroll: u16::MAX,
+            last_max_scroll: 0,
             status_line: "connecting to installed Codex…".to_string(),
+            permission_profiles: HashMap::new(),
+            completion_cwd: std::env::current_dir().unwrap_or_default(),
+            completion_popup: None,
+            backend_user_agent: None,
+            codex_current_version: None,
+            codex_latest_version: None,
+            codex_update_confirm: false,
+            codex_update_running: false,
+            codex_update_result: None,
             prompt: None,
+            prompt_draft: None,
+            prompt_draft_cursor: None,
             input_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
+            pasted_texts: Vec::new(),
+            next_paste_number: 1,
             agent_window_start: 0,
             agent_hitboxes: Vec::new(),
             agents_area: Rect::default(),
@@ -97,6 +217,15 @@ impl Workspace {
             composer_area: Rect::default(),
             session_picker: None,
             session_hitboxes: Vec::new(),
+            quit_armed: false,
+            info_open: false,
+            info_scroll: 0,
+            slash_selected: 0,
+            permission_picker: None,
+            suspended_permission_picker: None,
+            patch_open: false,
+            patch_scroll: 0,
+            project_browser: None,
         }
     }
 
@@ -114,9 +243,76 @@ impl Workspace {
         self.session_hitboxes.clear();
     }
 
+    pub(crate) fn show_permission_picker(
+        &mut self,
+        target_id: String,
+        choices: Vec<PermissionChoice>,
+        current: Option<&str>,
+    ) {
+        let selected = current
+            .and_then(|current| choices.iter().position(|choice| choice.id == current))
+            .unwrap_or(0);
+        self.permission_picker = Some(PermissionPicker {
+            target_id,
+            choices,
+            selected,
+        });
+        self.mode = Mode::Navigation;
+    }
+
+    pub(crate) fn set_permission_profile(&mut self, thread_id: &str, profile_id: &str) {
+        self.permission_profiles
+            .insert(thread_id.to_string(), profile_id.to_string());
+    }
+
+    pub(crate) fn set_completion_cwd(&mut self, cwd: PathBuf) {
+        self.completion_cwd = cwd;
+        self.completion_popup = None;
+    }
+
+    pub(crate) fn set_backend_user_agent(&mut self, user_agent: &str) {
+        self.backend_user_agent = (!user_agent.trim().is_empty()).then(|| user_agent.to_string());
+    }
+
+    fn scroll_log_up(&mut self, amount: u16) {
+        self.scroll = self.scroll.min(self.last_max_scroll).saturating_sub(amount);
+    }
+
+    fn scroll_log_down(&mut self, amount: u16) {
+        let next = self.scroll.min(self.last_max_scroll).saturating_add(amount);
+        self.scroll = if next >= self.last_max_scroll {
+            u16::MAX
+        } else {
+            next
+        };
+    }
+
+    pub(crate) fn set_codex_versions(&mut self, current: Option<String>, latest: Option<String>) {
+        self.codex_current_version = current;
+        self.codex_latest_version = latest;
+    }
+
+    pub(crate) fn codex_update_started(&mut self) {
+        self.codex_update_confirm = false;
+        self.codex_update_running = true;
+        self.codex_update_result = None;
+    }
+
+    pub(crate) fn codex_update_finished(&mut self, result: String) {
+        self.codex_update_running = false;
+        self.codex_update_result = Some(result);
+    }
+
     pub(crate) fn show_session_starting(&mut self) {
-        if let Some(picker) = self.session_picker.as_mut() {
-            picker.starting_new = true;
+        match self.session_picker.as_mut() {
+            Some(picker) => picker.starting_new = true,
+            None => {
+                self.session_picker = Some(SessionPicker {
+                    candidates: Vec::new(),
+                    selected: 0,
+                    starting_new: true,
+                });
+            }
         }
         self.session_hitboxes.clear();
     }
@@ -161,6 +357,16 @@ impl Workspace {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Action::Quit;
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+            if self.quit_armed {
+                return Action::Quit;
+            }
+            self.quit_armed = true;
+            self.mode = Mode::Navigation;
+            self.status_line = "Ctrl-D again to quit".to_string();
+            return Action::None;
+        }
+        self.quit_armed = false;
         if let Some(picker) = self.session_picker.as_mut() {
             if picker.starting_new {
                 return Action::None;
@@ -185,51 +391,285 @@ impl Workspace {
             }
             return Action::None;
         }
+        if let Some(picker) = self.permission_picker.as_mut() {
+            match key.code {
+                KeyCode::Up | KeyCode::Left => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    picker.selected =
+                        (picker.selected + 1).min(picker.choices.len().saturating_sub(1));
+                }
+                KeyCode::Enter => {
+                    let target_id = picker.target_id.clone();
+                    let profile_id = picker.choices[picker.selected].id.clone();
+                    self.permission_picker = None;
+                    return Action::PermissionSelected {
+                        target_id,
+                        profile_id,
+                    };
+                }
+                KeyCode::Esc => self.permission_picker = None,
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.completion_popup.is_some() && command::matches(&self.input).is_empty() {
+            match key.code {
+                KeyCode::Up => {
+                    let popup = self.completion_popup.as_mut().expect("completion popup");
+                    popup.selected = popup.selected.saturating_sub(1);
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    let popup = self.completion_popup.as_mut().expect("completion popup");
+                    popup.selected =
+                        (popup.selected + 1).min(popup.candidates.len().saturating_sub(1));
+                    return Action::None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.apply_selected_completion();
+                    return Action::None;
+                }
+                KeyCode::Esc => {
+                    self.completion_popup = None;
+                    return Action::None;
+                }
+                _ => self.completion_popup = None,
+            }
+        } else if self.completion_popup.is_some() {
+            self.completion_popup = None;
+        }
+        if !self.patch_open
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('u')
+        {
+            let accepts_text = self.prompt.as_ref().is_some_and(ServerPrompt::accepts_text);
+            if accepts_text || (self.prompt.is_none() && self.mode == Mode::Editing) {
+                self.input.clear();
+                self.input_cursor = None;
+                self.history_cursor = None;
+                self.history_draft.clear();
+                self.slash_selected = 0;
+            }
+            return Action::None;
+        }
+        if self.patch_open {
+            match key.code {
+                KeyCode::Char('q') => {
+                    self.patch_open = false;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.patch_open = false;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.patch_scroll = self.patch_scroll.saturating_sub(5)
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.patch_scroll = self.patch_scroll.saturating_add(5)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.patch_scroll = self.patch_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.patch_scroll = self.patch_scroll.saturating_add(1)
+                }
+                KeyCode::PageUp => self.patch_scroll = self.patch_scroll.saturating_sub(10),
+                KeyCode::PageDown => self.patch_scroll = self.patch_scroll.saturating_add(10),
+                KeyCode::Home => self.patch_scroll = 0,
+                KeyCode::End => self.patch_scroll = u16::MAX,
+                _ => {}
+            }
+            return Action::None;
+        }
         if let Some(prompt) = self.prompt.as_mut() {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('a')
+                && prompt.patch_text().is_some()
+            {
+                self.patch_open = true;
+                self.patch_scroll = 0;
+                return Action::None;
+            }
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll_log_up(10);
+                    return Action::None;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_log_down(10);
+                    return Action::None;
+                }
+                KeyCode::Home => {
+                    self.scroll = 0;
+                    return Action::None;
+                }
+                KeyCode::End => {
+                    self.scroll = u16::MAX;
+                    return Action::None;
+                }
+                _ => {}
+            }
             let resolution = prompt.handle_key(key, &mut self.input);
             if let Some(resolution) = resolution {
-                self.prompt = None;
-                self.input.clear();
+                self.finish_prompt();
                 return Action::ResolvePrompt(resolution);
             }
             return Action::None;
+        }
+        if self.info_open {
+            if self.codex_update_confirm {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        return Action::UpdateCodex;
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        self.codex_update_confirm = false;
+                    }
+                    _ => {}
+                }
+                return Action::None;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.info_open = false,
+                KeyCode::Char('u') | KeyCode::Char('U') if self.codex_update_available() => {
+                    self.codex_update_confirm = true;
+                }
+                KeyCode::Up => self.info_scroll = self.info_scroll.saturating_sub(1),
+                KeyCode::Down => self.info_scroll = self.info_scroll.saturating_add(1),
+                KeyCode::PageUp => self.info_scroll = self.info_scroll.saturating_sub(8),
+                KeyCode::PageDown => self.info_scroll = self.info_scroll.saturating_add(8),
+                KeyCode::Home => self.info_scroll = 0,
+                KeyCode::End => self.info_scroll = u16::MAX,
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(browser) = self.project_browser.as_mut() {
+            let action = browser.handle_key(key);
+            return match action {
+                BrowserAction::None => Action::None,
+                BrowserAction::Close => {
+                    self.project_browser = None;
+                    Action::None
+                }
+                BrowserAction::OpenEditor { editor, path } => match editor {
+                    EditorKind::Terminal => Action::OpenTerminalEditor {
+                        path,
+                        line: 1,
+                        column: 1,
+                    },
+                    EditorKind::VsCode => Action::OpenVsCode {
+                        path,
+                        line: 1,
+                        column: 1,
+                    },
+                    EditorKind::Cursor => Action::OpenCursor {
+                        path,
+                        line: 1,
+                        column: 1,
+                    },
+                },
+            };
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('a') => return self.prepare_subagent_request(),
+                KeyCode::Char('n') => return Action::NewSession,
+                KeyCode::Char('r') => return Action::ChooseSession,
+                _ => {}
+            }
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Interrupt;
         }
         match self.mode {
-            Mode::Editing => match key.code {
-                KeyCode::Esc => self.mode = Mode::Navigation,
-                KeyCode::Enter if !self.input.trim().is_empty() => {
-                    let input = std::mem::take(&mut self.input);
-                    if self.input_history.last() != Some(&input) {
-                        self.input_history.push(input.clone());
+            Mode::Editing => {
+                let slash_matches = command::matches(&self.input);
+                if !slash_matches.is_empty() {
+                    match key.code {
+                        KeyCode::Up => {
+                            self.slash_selected = self.slash_selected.saturating_sub(1);
+                            return Action::None;
+                        }
+                        KeyCode::Down => {
+                            self.slash_selected =
+                                (self.slash_selected + 1).min(slash_matches.len() - 1);
+                            return Action::None;
+                        }
+                        KeyCode::Enter | KeyCode::Tab => {
+                            let selected = self.slash_selected.min(slash_matches.len() - 1);
+                            self.input = format!("/{} ", slash_matches[selected].name);
+                            self.input_cursor = None;
+                            self.slash_selected = 0;
+                            return Action::None;
+                        }
+                        _ => {}
                     }
-                    self.history_cursor = None;
-                    self.history_draft.clear();
-                    return Action::Submit(input);
                 }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    self.history_cursor = None;
+                match key.code {
+                    KeyCode::Esc => self.mode = Mode::Navigation,
+                    KeyCode::Left => {
+                        self.move_cursor_left();
+                    }
+                    KeyCode::Right => {
+                        self.move_cursor_right();
+                    }
+                    KeyCode::Enter if !self.input.trim().is_empty() => {
+                        let displayed_input = std::mem::take(&mut self.input);
+                        self.input_cursor = None;
+                        if self.input_history.last() != Some(&displayed_input) {
+                            self.input_history.push(displayed_input.clone());
+                        }
+                        self.history_cursor = None;
+                        self.history_draft.clear();
+                        self.mode = Mode::Navigation;
+                        return Action::Submit(self.expand_pasted_text(&displayed_input));
+                    }
+                    KeyCode::Tab => {
+                        self.start_completion();
+                    }
+                    KeyCode::Backspace => {
+                        self.backspace_at_cursor();
+                        self.history_cursor = None;
+                        self.slash_selected = 0;
+                    }
+                    KeyCode::Up => self.older_input(),
+                    KeyCode::Down => self.newer_input(),
+                    KeyCode::PageUp => self.scroll_log_up(10),
+                    KeyCode::PageDown => self.scroll_log_down(10),
+                    KeyCode::Home => self.input_cursor = Some(0),
+                    KeyCode::End => self.input_cursor = None,
+                    KeyCode::Char(character) => {
+                        self.insert_at_cursor(&character.to_string());
+                        self.history_cursor = None;
+                        self.slash_selected = 0;
+                    }
+                    _ => {}
                 }
-                KeyCode::Up => self.older_input(),
-                KeyCode::Down => self.newer_input(),
-                KeyCode::Char(character) => {
-                    self.input.push(character);
-                    self.history_cursor = None;
-                }
-                _ => {}
-            },
+            }
             Mode::Navigation => match key.code {
                 KeyCode::Enter => self.mode = Mode::Editing,
+                KeyCode::Char('t') => {
+                    let root = self
+                        .selected_thread()
+                        .and_then(|thread| {
+                            (!thread.cwd.is_empty()).then(|| PathBuf::from(&thread.cwd))
+                        })
+                        .unwrap_or_else(|| self.completion_cwd.clone());
+                    self.project_browser = Some(ProjectBrowser::open(root));
+                }
+                KeyCode::Char('i') => {
+                    self.info_open = true;
+                    self.info_scroll = 0;
+                }
                 KeyCode::Char(character)
                     if !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     self.mode = Mode::Editing;
-                    self.input.push(character);
+                    self.insert_at_cursor(&character.to_string());
                     self.history_cursor = None;
                 }
                 KeyCode::Left | KeyCode::Up => {
@@ -242,13 +682,45 @@ impl Workspace {
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
                 }
-                KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-                KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
+                KeyCode::PageUp => self.scroll_log_up(10),
+                KeyCode::PageDown => self.scroll_log_down(10),
                 KeyCode::Home => self.scroll = 0,
                 KeyCode::End => self.scroll = u16::MAX,
                 _ => {}
             },
         }
+        Action::None
+    }
+
+    pub(crate) fn handle_paste(&mut self, text: String) -> Action {
+        if self.session_picker.is_some() || self.info_open || self.permission_picker.is_some() {
+            return Action::None;
+        }
+        if let Some(prompt) = self.prompt.as_ref() {
+            if prompt.accepts_text() {
+                self.input.push_str(&text);
+                self.input_cursor = None;
+            }
+            return Action::None;
+        }
+        if self.mode == Mode::Navigation {
+            self.mode = Mode::Editing;
+        }
+        if text.contains(['\n', '\r']) {
+            let additional_lines = count_line_breaks(&text);
+            let placeholder = format!(
+                "[Pasted text #{} +{} lines]",
+                self.next_paste_number, additional_lines
+            );
+            self.next_paste_number += 1;
+            self.insert_at_cursor(&placeholder);
+            self.pasted_texts.push(PastedText { placeholder, text });
+        } else {
+            self.insert_at_cursor(&text);
+        }
+        self.history_cursor = None;
+        self.slash_selected = 0;
+        self.completion_popup = None;
         Action::None
     }
 
@@ -274,7 +746,33 @@ impl Workspace {
         if self.session_picker.is_some() {
             return Action::None;
         }
+        if self.permission_picker.is_some() {
+            return Action::None;
+        }
+        if self.patch_open {
+            return Action::None;
+        }
+        if self.info_open {
+            return Action::None;
+        }
         if self.prompt.is_some() {
+            match event.kind {
+                MouseEventKind::ScrollUp
+                    if self
+                        .log_area
+                        .contains(ratatui::layout::Position::new(event.column, event.row)) =>
+                {
+                    self.scroll_log_up(3);
+                }
+                MouseEventKind::ScrollDown
+                    if self
+                        .log_area
+                        .contains(ratatui::layout::Position::new(event.column, event.row)) =>
+                {
+                    self.scroll_log_down(3);
+                }
+                _ => {}
+            }
             return Action::None;
         }
         match event.kind {
@@ -304,16 +802,14 @@ impl Workspace {
                     .log_area
                     .contains(ratatui::layout::Position::new(event.column, event.row)) =>
             {
-                self.mode = Mode::Navigation;
-                self.scroll = self.scroll.saturating_sub(3);
+                self.scroll_log_up(3);
             }
             MouseEventKind::ScrollDown
                 if self
                     .log_area
                     .contains(ratatui::layout::Position::new(event.column, event.row)) =>
             {
-                self.mode = Mode::Navigation;
-                self.scroll = self.scroll.saturating_add(3);
+                self.scroll_log_down(3);
             }
             _ => {}
         }
@@ -321,15 +817,41 @@ impl Workspace {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        frame.render_widget(
+            Block::new().style(Style::default().bg(APP_BACKGROUND)),
+            frame.area(),
+        );
         if self.session_picker.is_some() {
             self.render_session_picker(frame);
             return;
         }
+        if self.prompt.is_none()
+            && let Some(browser) = self.project_browser.as_mut()
+        {
+            browser.render(frame);
+            return;
+        }
+        if self.patch_open {
+            self.render_patch_view(frame);
+            return;
+        }
+        let composer_height =
+            if let Some(lines) = self.prompt.as_ref().and_then(ServerPrompt::decision_lines) {
+                let width = frame.area().width.saturating_sub(2).max(1) as usize;
+                let line_count = lines
+                    .iter()
+                    .map(|line| textwrap::wrap(&line.text, width).len().max(1))
+                    .sum::<usize>();
+                (line_count.saturating_add(2).min(u16::MAX as usize) as u16)
+                    .min(frame.area().height.saturating_sub(5))
+            } else {
+                3
+            };
         let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
-                Constraint::Length(3),
+                Constraint::Length(composer_height),
                 Constraint::Length(3),
             ])
             .split(frame.area());
@@ -346,16 +868,20 @@ impl Workspace {
             .split(outer[0]);
         self.log_area = log_layout[1];
         let selected = self.selected_thread();
-        let header = self.prompt.as_ref().map_or_else(
-            || {
-                selected.map_or_else(
-                    || self.status_line.clone(),
-                    |thread| format!("{}  ·  {}", thread.label, thread.display_status()),
-                )
-            },
-            |_| "Action required".to_string(),
-        );
-        frame.render_widget(Paragraph::new(header.cyan().bold()), log_layout[0]);
+        let header = if self.quit_armed {
+            "Ctrl-D again to quit · any other key cancels".to_string()
+        } else {
+            self.prompt.as_ref().map_or_else(
+                || {
+                    selected.map_or_else(
+                        || self.status_line.clone(),
+                        |thread| format!("{}  ·  {}", thread.label, thread.display_status()),
+                    )
+                },
+                |_| "Action required".to_string(),
+            )
+        };
+        frame.render_widget(Paragraph::new(header.fg(ACCENT_CYAN).bold()), log_layout[0]);
         let log_lines = self.prompt.as_ref().map_or_else(
             || {
                 selected.map_or_else(
@@ -374,6 +900,7 @@ impl Workspace {
         let visible_height = self.log_area.height;
         let line_count = log_lines.len().min(u16::MAX as usize) as u16;
         let max_scroll = line_count.saturating_sub(visible_height);
+        self.last_max_scroll = max_scroll;
         let scroll = self.scroll.min(max_scroll);
         frame.render_widget(
             Paragraph::new(Text::from(log_lines)).scroll((scroll, 0)),
@@ -387,23 +914,118 @@ impl Workspace {
             },
             ServerPrompt::composer_title,
         );
-        let displayed_input = if self.prompt.as_ref().is_some_and(ServerPrompt::masks_input) {
-            "•".repeat(self.input.chars().count())
+        let displayed_input = self.prompt.as_ref().map_or_else(
+            || self.input.clone(),
+            |prompt| {
+                prompt.decision_text().unwrap_or_else(|| {
+                    if prompt.masks_input() {
+                        "•".repeat(self.input.chars().count())
+                    } else {
+                        self.input.clone()
+                    }
+                })
+            },
+        );
+        let decision_prompt = self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| !prompt.accepts_text());
+        let composer_border = if decision_prompt {
+            APPROVAL_BORDER
         } else {
-            self.input.clone()
+            match self.mode {
+                Mode::Editing => ACCENT_CYAN,
+                Mode::Navigation => BORDER_MUTED,
+            }
         };
+        let composer_background = if decision_prompt {
+            APPROVAL_BACKGROUND
+        } else {
+            APP_BACKGROUND
+        };
+        let displayed_cursor = if self.prompt.is_some() {
+            displayed_input.len()
+        } else {
+            self.actual_input_cursor()
+        };
+        let (composer_scroll, cursor_column, cursor_row) = if decision_prompt {
+            (0, 0, 0)
+        } else {
+            composer_viewport(
+                &displayed_input,
+                displayed_cursor,
+                self.composer_area.width.saturating_sub(2),
+                self.composer_area.height.saturating_sub(2),
+            )
+        };
+        let composer_width = self.composer_area.width.saturating_sub(2).max(1) as usize;
+        let wrapped_input = wrap_composer_input(&displayed_input, composer_width).join("\n");
+        let composer_text = self
+            .prompt
+            .as_ref()
+            .and_then(ServerPrompt::decision_lines)
+            .map_or_else(
+                || Text::from(wrapped_input),
+                |decision_lines| {
+                    Text::from(
+                        decision_lines
+                            .into_iter()
+                            .flat_map(|decision| {
+                                let style = if decision.selected {
+                                    Style::default()
+                                        .bg(SELECTED_BACKGROUND)
+                                        .fg(APPROVAL_BORDER)
+                                        .bold()
+                                } else {
+                                    Style::default().fg(APPROVAL_BORDER).bold()
+                                };
+                                textwrap::wrap(&decision.text, composer_width)
+                                    .into_iter()
+                                    .map(move |line| {
+                                        Line::from(Span::styled(line.into_owned(), style))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                },
+            );
         frame.render_widget(
-            Paragraph::new(displayed_input).block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(title),
-            ),
+            Paragraph::new(composer_text)
+                .scroll((composer_scroll, 0))
+                .style(
+                    Style::default()
+                        .bg(composer_background)
+                        .fg(if decision_prompt {
+                            APPROVAL_BORDER
+                        } else {
+                            Color::Reset
+                        })
+                        .bold(),
+                )
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(composer_border))
+                        .style(Style::default().bg(composer_background))
+                        .title(title),
+                ),
             self.composer_area,
         );
 
+        self.render_completion_menu(frame);
+        self.render_slash_menu(frame);
+
         self.render_agent_bar(frame);
         self.render_metrics(frame, footer[1]);
+        if self.info_open {
+            self.render_info_overlay(frame);
+            return;
+        }
+        if self.permission_picker.is_some() {
+            self.render_permission_picker(frame);
+            return;
+        }
         let show_cursor = self
             .prompt
             .as_ref()
@@ -413,29 +1035,279 @@ impl Workspace {
                 .composer_area
                 .x
                 .saturating_add(1)
-                .saturating_add(self.input.chars().count() as u16)
+                .saturating_add(cursor_column)
                 .min(self.composer_area.right().saturating_sub(2));
-            frame.set_cursor_position((cursor_x, self.composer_area.y + 1));
+            let cursor_y = self
+                .composer_area
+                .y
+                .saturating_add(1)
+                .saturating_add(cursor_row)
+                .min(self.composer_area.bottom().saturating_sub(2));
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
 
-    fn render_session_picker(&mut self, frame: &mut Frame) {
+    fn render_slash_menu(&self, frame: &mut Frame) {
+        let matches = command::matches(&self.input);
+        if self.mode != Mode::Editing || matches.is_empty() || self.prompt.is_some() {
+            return;
+        }
+        let visible = matches.len().min(8);
+        let height = (visible as u16).saturating_add(2);
+        let area = Rect::new(
+            self.composer_area.x,
+            self.composer_area.y.saturating_sub(height),
+            self.composer_area.width,
+            height.min(self.composer_area.y),
+        );
+        if area.height < 2 {
+            return;
+        }
+        let selected = self.slash_selected.min(matches.len() - 1);
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let lines = matches
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, command)| {
+                let style = if index == selected {
+                    Style::default().bg(SELECTED_BACKGROUND).bold()
+                } else {
+                    Style::default().bg(APP_BACKGROUND)
+                };
+                styled_full_line(
+                    format!(" /{:<14} {}", command.name, command.description),
+                    area.width.saturating_sub(2),
+                    style,
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_CYAN))
+                    .style(Style::default().bg(APP_BACKGROUND))
+                    .title(" Commands ")
+                    .title_bottom(" ↑/↓ select · Enter/Tab insert "),
+            ),
+            area,
+        );
+    }
+
+    fn render_completion_menu(&self, frame: &mut Frame) {
+        let Some(popup) = self.completion_popup.as_ref() else {
+            return;
+        };
+        if self.mode != Mode::Editing || self.prompt.is_some() {
+            return;
+        }
+        let visible = popup.candidates.len().min(8);
+        let height = (visible as u16).saturating_add(2);
+        let area = Rect::new(
+            self.composer_area.x,
+            self.composer_area.y.saturating_sub(height),
+            self.composer_area.width,
+            height.min(self.composer_area.y),
+        );
+        if area.height < 2 {
+            return;
+        }
+        let selected = popup.selected.min(popup.candidates.len().saturating_sub(1));
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let lines = popup
+            .candidates
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, candidate)| {
+                let style = if index == selected {
+                    Style::default().bg(SELECTED_BACKGROUND).bold()
+                } else {
+                    Style::default().bg(APP_BACKGROUND)
+                };
+                styled_full_line(format!(" {candidate}"), area.width.saturating_sub(2), style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_CYAN))
+                    .style(Style::default().bg(APP_BACKGROUND))
+                    .title(" Completions ")
+                    .title_bottom(" ↑/↓ select · Enter/Tab insert · Esc close "),
+            ),
+            area,
+        );
+    }
+
+    fn render_info_overlay(&self, frame: &mut Frame) {
+        let Some(thread) = self.selected_thread() else {
+            return;
+        };
+        let area = centered_info_area(frame.area());
+        let root_id = self.root_id.as_deref().unwrap_or("unavailable");
+        let session_id = nonempty_or(&thread.session_id, "unavailable");
+        let parent_id = thread.parent_id.as_deref().unwrap_or("none (Main)");
+        let cwd = nonempty_or(&thread.cwd, "unavailable");
+        let log_path = thread
+            .path
+            .as_deref()
+            .unwrap_or("not persisted / unavailable");
+        let backend = self.backend_user_agent.as_deref().unwrap_or("unavailable");
+        let body = format!(
+            "Session ID: {session_id}\nRoot thread ID: {root_id}\nAgent: {}\nAgent thread ID: {}\nParent thread ID: {parent_id}\nStatus: {}\nWorking directory: {cwd}\nRollout / log: {log_path}",
+            thread.label,
+            thread.id,
+            thread.display_status(),
+        );
+        frame.render_widget(Clear, area);
+        let inner_height = area.height.saturating_sub(2);
+        let current = self
+            .codex_current_version
+            .as_deref()
+            .unwrap_or("unavailable");
+        let latest = self
+            .codex_latest_version
+            .as_deref()
+            .unwrap_or("unavailable");
+        let update_available = self.codex_update_available();
+        let version_style = if update_available {
+            Style::default().red().bold()
+        } else {
+            Style::default().fg(ACCENT_GREEN)
+        };
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!("Codex version: {current} (latest: {latest})"),
+                version_style,
+            )),
+            format!("Codex backend: {backend}").into(),
+        ];
+        if update_available {
+            lines.push("Update available · U update".red().bold().into());
+        }
+        if self.codex_update_running {
+            lines.push("Updating Codex…".yellow().bold().into());
+        }
+        if let Some(result) = &self.codex_update_result {
+            lines.extend(plain_lines(result, area.width.saturating_sub(2)));
+        }
+        lines.extend(plain_lines(&body, area.width.saturating_sub(2)));
+        let max_scroll = (lines.len().min(u16::MAX as usize) as u16).saturating_sub(inner_height);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .scroll((self.info_scroll.min(max_scroll), 0))
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(ACCENT_CYAN))
+                        .style(Style::default().bg(APP_BACKGROUND))
+                        .title(" Session / agent info ")
+                        .title_bottom(if self.codex_update_confirm {
+                            " Update Codex now? y / Enter confirm · n / Esc cancel "
+                        } else if update_available {
+                            " U update · ↑/↓ scroll · i / Esc / Enter close "
+                        } else {
+                            " ↑/↓ scroll · i / Esc / Enter close "
+                        }),
+                ),
+            area,
+        );
+    }
+
+    fn codex_update_available(&self) -> bool {
+        self.codex_current_version
+            .as_deref()
+            .zip(self.codex_latest_version.as_deref())
+            .is_some_and(|(current, latest)| version::update_available(current, latest))
+            && !self.codex_update_running
+    }
+
+    fn render_permission_picker(&self, frame: &mut Frame) {
+        let Some(picker) = self.permission_picker.as_ref() else {
+            return;
+        };
+        let area = centered_session_area(frame.area(), picker.choices.len());
+        frame.render_widget(Clear, area);
+        let lines = picker
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                let style = if index == picker.selected {
+                    Style::default().bg(SELECTED_BACKGROUND).bold()
+                } else {
+                    Style::default().bg(APP_BACKGROUND)
+                };
+                styled_full_line(
+                    format!(" {} · {}", choice.id, choice.description),
+                    area.width.saturating_sub(2),
+                    style,
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_CYAN))
+                    .style(Style::default().bg(APP_BACKGROUND))
+                    .title(" Permissions ")
+                    .title_bottom(" ↑/↓ select · Enter apply · Esc cancel "),
+            ),
+            area,
+        );
+    }
+
+    fn render_patch_view(&self, frame: &mut Frame) {
+        let Some(patch) = self.prompt.as_ref().and_then(ServerPrompt::patch_text) else {
+            return;
+        };
         let area = frame.area();
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Choose session · ↑/↓ select · Enter open ");
+            .border_style(Style::default().fg(ACCENT_CYAN))
+            .style(Style::default().bg(APP_BACKGROUND))
+            .title(" P A T C H ")
+            .title_bottom(" ↑/↓ · PgUp/PgDn · Home/End · q/Ctrl-C close ");
+        let inner = block.inner(area);
+        let lines = patch_lines(patch, inner.width);
+        let max_scroll = (lines.len().min(u16::MAX as usize) as u16).saturating_sub(inner.height);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .scroll((self.patch_scroll.min(max_scroll), 0))
+                .block(block),
+            area,
+        );
+    }
+
+    fn render_session_picker(&mut self, frame: &mut Frame) {
+        let Some(picker) = self.session_picker.as_ref() else {
+            return;
+        };
+        let area = centered_session_area(frame.area(), picker.candidates.len());
+        frame.render_widget(Clear, area);
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ACCENT_CYAN))
+            .style(Style::default().bg(APP_BACKGROUND))
+            .title(" Choose session ")
+            .title_bottom(" ↑/↓ select · Enter open ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.session_hitboxes.clear();
 
-        let Some(picker) = self.session_picker.as_ref() else {
-            return;
-        };
         if picker.starting_new {
             frame.render_widget(
-                Paragraph::new("Creating a clean Main session…".cyan().bold()),
-                Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
+                Paragraph::new("Creating a clean Main session…".fg(ACCENT_CYAN).bold()).centered(),
+                Rect::new(inner.x, inner.y, inner.width, inner.height),
             );
             return;
         }
@@ -470,9 +1342,9 @@ impl Workspace {
             }
             let label = truncate_line(&label, available_width);
             let style = if index == picker.selected {
-                Style::default().bg(Color::Rgb(42, 50, 56)).bold()
+                Style::default().bg(SELECTED_BACKGROUND).bold()
             } else {
-                Style::default()
+                Style::default().bg(APP_BACKGROUND)
             };
             let row_area = Rect::new(
                 inner.x.saturating_add(1),
@@ -493,17 +1365,12 @@ impl Workspace {
             .order
             .iter()
             .filter_map(|id| {
-                self.threads.get(id).map(|thread| {
-                    format!(
-                        " {} {} {} ",
-                        thread.label,
-                        status_marker(&thread.status),
-                        short_id(&thread.id)
-                    )
-                })
+                self.threads
+                    .get(id)
+                    .map(|thread| format!(" {} {} ", thread.label, status_marker(&thread.status)))
             })
             .collect::<Vec<_>>();
-        let available = self.agents_area.width.saturating_sub(2) as usize;
+        let available = self.agents_area.width as usize;
         if self.selected < self.agent_window_start {
             self.agent_window_start = self.selected;
         }
@@ -526,14 +1393,14 @@ impl Workspace {
                 break;
             }
             let style = if index == self.selected {
-                Style::default().bg(Color::Rgb(42, 50, 56))
+                Style::default().bg(SELECTED_BACKGROUND).bold()
             } else {
                 agent_status_style(self.threads[&self.order[index]].status.as_str())
             };
             spans.push(Span::styled(entry.clone(), style));
             self.agent_hitboxes.push((
                 Rect::new(
-                    self.agents_area.x + 1 + used as u16,
+                    self.agents_area.x + used as u16,
                     self.agents_area.y + 1,
                     width as u16,
                     1,
@@ -543,39 +1410,65 @@ impl Workspace {
             used += width;
         }
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(" Agents · ←/→ select "),
+            Paragraph::new(
+                Line::from("Agents · ←/→ · i info · ^A agent · ^N new · ^R sessions")
+                    .fg(MUTED_TEXT),
             ),
-            self.agents_area,
+            Rect::new(
+                self.agents_area.x,
+                self.agents_area.y,
+                self.agents_area.width,
+                1,
+            ),
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(
+                self.agents_area.x,
+                self.agents_area.y + 1,
+                self.agents_area.width,
+                1,
+            ),
         );
     }
 
     fn render_metrics(&self, frame: &mut Frame, area: Rect) {
         let metrics = self.selected_thread().map_or_else(
-            || self.status_line.clone(),
+            || Line::from(self.status_line.clone()).fg(MUTED_TEXT),
             |thread| {
-                format!(
-                    "{} · {} · in {} out {} total {} · {}",
-                    thread.display_status(),
-                    format_duration(thread.elapsed()),
-                    thread.tokens.input,
-                    thread.tokens.output,
-                    thread.tokens.total,
-                    thread.id
-                )
+                let mut spans = Vec::new();
+                if let Some(profile) = self.permission_profiles.get(&thread.id) {
+                    spans.push("permissions ".fg(MUTED_TEXT));
+                    let style = if is_full_access_profile(profile) {
+                        Style::default().fg(Color::Red).bold()
+                    } else {
+                        Style::default().fg(MUTED_TEXT)
+                    };
+                    spans.push(Span::styled(profile.clone(), style));
+                    spans.push(" · ".fg(MUTED_TEXT));
+                }
+                spans.push(
+                    format!(
+                        "{} · {} · in {} out {} total {} · {}",
+                        thread.display_status(),
+                        format_duration(thread.elapsed()),
+                        thread.tokens.input,
+                        thread.tokens.output,
+                        thread.tokens.total,
+                        thread.id
+                    )
+                    .fg(MUTED_TEXT),
+                );
+                Line::from(spans)
             },
         );
         frame.render_widget(
-            Paragraph::new(metrics).block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(" Activity "),
-            ),
-            area,
+            Paragraph::new("Activity".fg(MUTED_TEXT)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(metrics),
+            Rect::new(area.x, area.y + 1, area.width, 1),
         );
     }
 
@@ -583,7 +1476,14 @@ impl Workspace {
         if self.prompt.is_some() {
             return Err(Box::new(prompt));
         }
-        self.input.clear();
+        self.prompt_draft = Some(std::mem::take(&mut self.input));
+        self.prompt_draft_cursor = self.input_cursor.take();
+        self.completion_popup = None;
+        self.info_open = false;
+        self.suspended_permission_picker = self.permission_picker.take();
+        self.patch_open = false;
+        self.slash_selected = 0;
+        self.scroll = 0;
         self.prompt = Some(prompt);
         Ok(())
     }
@@ -601,6 +1501,48 @@ impl Workspace {
         };
         self.history_cursor = Some(index);
         self.input.clone_from(&self.input_history[index]);
+        self.input_cursor = None;
+    }
+
+    fn actual_input_cursor(&self) -> usize {
+        self.input_cursor
+            .unwrap_or(self.input.len())
+            .min(self.input.len())
+    }
+
+    fn insert_at_cursor(&mut self, text: &str) {
+        let cursor = self.actual_input_cursor();
+        self.input.insert_str(cursor, text);
+        self.input_cursor = Some(cursor + text.len());
+    }
+
+    fn move_cursor_left(&mut self) {
+        let cursor = self.actual_input_cursor();
+        let previous = self.input[..cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+        self.input_cursor = Some(previous);
+        self.slash_selected = 0;
+    }
+
+    fn move_cursor_right(&mut self) {
+        let cursor = self.actual_input_cursor();
+        let next = self.input[cursor..]
+            .chars()
+            .next()
+            .map_or(cursor, |character| cursor + character.len_utf8());
+        self.input_cursor = Some(next);
+        self.slash_selected = 0;
+    }
+
+    fn backspace_at_cursor(&mut self) {
+        let cursor = self.actual_input_cursor();
+        let Some((previous, _)) = self.input[..cursor].char_indices().next_back() else {
+            return;
+        };
+        self.input.replace_range(previous..cursor, "");
+        self.input_cursor = Some(previous);
     }
 
     fn newer_input(&mut self) {
@@ -610,10 +1552,70 @@ impl Workspace {
         if index + 1 < self.input_history.len() {
             self.history_cursor = Some(index + 1);
             self.input.clone_from(&self.input_history[index + 1]);
+            self.input_cursor = None;
         } else {
             self.history_cursor = None;
             self.input.clone_from(&self.history_draft);
+            self.input_cursor = None;
         }
+    }
+
+    fn start_completion(&mut self) {
+        let end = self.actual_input_cursor();
+        let completion = shell_completion::complete(&self.input[..end], &self.completion_cwd);
+        match completion.candidates.as_slice() {
+            [] => self.completion_popup = None,
+            [candidate] => {
+                self.input.replace_range(completion.start..end, candidate);
+                self.input_cursor = Some(completion.start + candidate.len());
+                self.completion_popup = None;
+                self.history_cursor = None;
+            }
+            _ => {
+                self.completion_popup = Some(CompletionPopup {
+                    start: completion.start,
+                    end,
+                    candidates: completion.candidates,
+                    selected: 0,
+                });
+            }
+        }
+    }
+
+    fn expand_pasted_text(&self, input: &str) -> String {
+        let mut expanded = String::with_capacity(input.len());
+        let mut cursor = 0;
+        while cursor < input.len() {
+            let next = self
+                .pasted_texts
+                .iter()
+                .filter_map(|paste| {
+                    input[cursor..]
+                        .find(&paste.placeholder)
+                        .map(|offset| (cursor + offset, paste))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, paste)) = next else {
+                expanded.push_str(&input[cursor..]);
+                break;
+            };
+            expanded.push_str(&input[cursor..offset]);
+            expanded.push_str(&paste.text);
+            cursor = offset + paste.placeholder.len();
+        }
+        expanded
+    }
+
+    fn apply_selected_completion(&mut self) {
+        let Some(popup) = self.completion_popup.take() else {
+            return;
+        };
+        let Some(candidate) = popup.candidates.get(popup.selected) else {
+            return;
+        };
+        self.input.replace_range(popup.start..popup.end, candidate);
+        self.input_cursor = Some(popup.start + candidate.len());
+        self.history_cursor = None;
     }
 
     pub(crate) fn clear_prompt(&mut self, request_id: &serde_json::Value) {
@@ -622,9 +1624,42 @@ impl Workspace {
             .as_ref()
             .is_some_and(|prompt| &prompt.request_id == request_id)
         {
-            self.prompt = None;
-            self.input.clear();
+            self.finish_prompt();
         }
+    }
+
+    fn finish_prompt(&mut self) {
+        self.prompt = None;
+        self.patch_open = false;
+        self.input = self.prompt_draft.take().unwrap_or_default();
+        self.input_cursor = self.prompt_draft_cursor.take();
+        if let Some(picker) = self.suspended_permission_picker.take() {
+            if self.threads.contains_key(&picker.target_id) {
+                self.permission_picker = Some(picker);
+                self.mode = Mode::Navigation;
+            } else {
+                self.status_line = format!(
+                    "permissions picker closed: thread {} is no longer available",
+                    picker.target_id
+                );
+            }
+        }
+    }
+
+    fn prepare_subagent_request(&mut self) -> Action {
+        let Some(root_id) = self.root_id.as_ref() else {
+            self.status_line = "open a Main session before starting an agent".to_string();
+            return Action::None;
+        };
+        if let Some(root_index) = self.order.iter().position(|id| id == root_id) {
+            self.selected = root_index;
+        }
+        self.mode = Mode::Editing;
+        self.input = "Start a new sub-agent for this task: ".to_string();
+        self.input_cursor = None;
+        self.history_cursor = None;
+        self.scroll = u16::MAX;
+        Action::SelectionChanged
     }
 }
 
@@ -653,14 +1688,10 @@ fn log_entry_lines(entry: &LogEntry, width: u16) -> Vec<Line<'static>> {
             );
             lines
         }
-        LogKind::Agent => wrapped_strings(&entry.text, width)
-            .into_iter()
-            .map(Line::from)
-            .collect(),
-        LogKind::Activity => wrapped_strings(&format!("› {}", entry.text), width)
-            .into_iter()
-            .map(|line| Line::from(line).fg(Color::Rgb(116, 139, 148)))
-            .collect(),
+        LogKind::Agent => prefixed_log_lines("● ", &entry.text, width, Style::default()),
+        LogKind::Activity => {
+            prefixed_log_lines("● ", &entry.text, width, Style::default().fg(ACCENT_GREEN))
+        }
     }
 }
 
@@ -668,6 +1699,29 @@ fn plain_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     wrapped_strings(text, width)
         .into_iter()
         .map(Line::from)
+        .collect()
+}
+
+fn patch_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    text.lines()
+        .flat_map(|line| {
+            let style = if line.starts_with("+++") || line.starts_with("---") {
+                Style::default().fg(MUTED_TEXT)
+            } else if line.starts_with('+') {
+                Style::default().fg(ACCENT_GREEN)
+            } else if line.starts_with('-') {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with("@@") {
+                Style::default().fg(ACCENT_CYAN)
+            } else if line.contains(": /") || line.starts_with("update:") {
+                Style::default().bold()
+            } else {
+                Style::default()
+            };
+            wrapped_strings(line, width.saturating_sub(2))
+                .into_iter()
+                .map(move |line| Line::from(Span::styled(format!("  {line}"), style)))
+        })
         .collect()
 }
 
@@ -702,7 +1756,107 @@ fn styled_full_line(text: String, width: u16, style: Style) -> Line<'static> {
 }
 
 fn user_message_background() -> Color {
-    Color::Rgb(31, 47, 56)
+    SURFACE_BACKGROUND
+}
+
+fn prefixed_log_lines(
+    prefix: &str,
+    text: &str,
+    width: u16,
+    prefix_style: Style,
+) -> Vec<Line<'static>> {
+    let prefix_width = prefix.chars().count() as u16;
+    wrapped_strings(text, width.saturating_sub(prefix_width))
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let marker = if index == 0 { prefix } else { "  " };
+            Line::from(vec![
+                Span::styled(marker.to_string(), prefix_style),
+                Span::from(line),
+            ])
+        })
+        .collect()
+}
+
+fn centered_session_area(outer: Rect, candidate_count: usize) -> Rect {
+    let width = outer.width.saturating_sub(4).min(92);
+    let desired_height = (candidate_count.saturating_add(3)).min(u16::MAX as usize) as u16;
+    let height = desired_height.min(outer.height.saturating_sub(4)).max(3);
+    Rect::new(
+        outer.x + outer.width.saturating_sub(width) / 2,
+        outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn centered_info_area(outer: Rect) -> Rect {
+    let width = outer.width.saturating_sub(2).clamp(1, 100);
+    let height = outer.height.saturating_sub(2).clamp(1, 14);
+    Rect::new(
+        outer.x + outer.width.saturating_sub(width) / 2,
+        outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn nonempty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() { fallback } else { value }
+}
+
+fn composer_viewport(text: &str, cursor: usize, width: u16, height: u16) -> (u16, u16, u16) {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let cursor = cursor.min(text.len());
+    let lines = wrap_composer_input(&text[..cursor], width);
+    let line_count = lines.len().max(1);
+    let scroll = line_count.saturating_sub(height);
+    let last_line = lines.last().map_or("", AsRef::as_ref);
+    let cursor_column = textwrap::core::display_width(last_line).min(width);
+    let cursor_row = line_count.saturating_sub(1).saturating_sub(scroll);
+    (
+        scroll.min(u16::MAX as usize) as u16,
+        cursor_column.min(u16::MAX as usize) as u16,
+        cursor_row.min(u16::MAX as usize) as u16,
+    )
+}
+
+/// Hard-wraps composer input without textwrap's word-boundary whitespace trimming.
+///
+/// The trailing empty line at an exact boundary is intentional: it is the cell
+/// where the terminal cursor belongs after the last visible column is occupied.
+fn wrap_composer_input(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    let mut column: usize = 0;
+
+    for character in text.chars() {
+        if character == '\n' {
+            lines.push(String::new());
+            column = 0;
+            continue;
+        }
+
+        let character_width = textwrap::core::display_width(&character.to_string());
+        if column > 0 && column.saturating_add(character_width) > width {
+            lines.push(String::new());
+            column = 0;
+        }
+        lines
+            .last_mut()
+            .expect("composer wrapper always has a line")
+            .push(character);
+        column = column.saturating_add(character_width);
+
+        if column >= width {
+            lines.push(String::new());
+            column = 0;
+        }
+    }
+
+    lines
 }
 
 fn relative_time(timestamp: i64) -> String {
@@ -731,7 +1885,7 @@ fn truncate_line(text: &str, max_chars: usize) -> String {
 fn append_children(order: &mut Vec<String>, parent: &str, threads: &HashMap<String, AgentThread>) {
     let mut children = threads
         .values()
-        .filter(|thread| thread.parent_id.as_deref() == Some(parent))
+        .filter(|thread| thread.parent_id.as_deref() == Some(parent) && thread.status != "closed")
         .collect::<Vec<_>>();
     children.sort_by(|left, right| {
         left.created_at
@@ -760,11 +1914,15 @@ fn short_id(id: &str) -> String {
 
 fn agent_status_style(status: &str) -> Style {
     match status {
-        "working" => Style::default().fg(Color::Green),
+        "working" => Style::default().fg(ACCENT_GREEN),
         "error" => Style::default().fg(Color::Red),
-        "closed" => Style::default().fg(Color::DarkGray),
-        _ => Style::default().fg(Color::Yellow),
+        "closed" => Style::default().fg(MUTED_TEXT),
+        _ => Style::default(),
     }
+}
+
+fn is_full_access_profile(profile: &str) -> bool {
+    profile.eq_ignore_ascii_case("full") || profile.eq_ignore_ascii_case("full-access")
 }
 
 fn status_marker(status: &str) -> &'static str {

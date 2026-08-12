@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
@@ -31,10 +32,13 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    pub(crate) fn spawn(codex: &Path, codex_home: &Path) -> Result<Self> {
+    pub(crate) fn spawn(codex: &Path, codex_home: &Path, codex_args: &[OsString]) -> Result<Self> {
         std::fs::create_dir_all(codex_home)
             .with_context(|| format!("failed to create CODEX_HOME {}", codex_home.display()))?;
         let mut child = Command::new(codex)
+            .args(codex_args)
+            .arg("-c")
+            .arg("features.multi_agent_v2=false")
             .arg("app-server")
             .env("CODEX_HOME", codex_home)
             .stdin(Stdio::piped())
