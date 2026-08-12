@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.10 — 2026-08-13
+
+- Fixed the checksum path stored inside release archives so `SHA256SUMS` can be
+  verified directly from the extracted package directory.
+- Added a release-workflow check that extracts every platform archive and
+  verifies its internal binary checksum before upload.
+
 ## 0.4.9 — 2026-08-12
 
 - Fixed multiline terminal paste so pasted line breaks are collapsed into one

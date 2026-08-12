@@ -47,7 +47,7 @@ install into `~/.local/bin`; `sudo` is not required.
 ### Linux x86_64
 
 ```bash
-version="0.4.9"
+version="0.4.10"
 platform="linux-x86_64"
 base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
 curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
@@ -65,7 +65,7 @@ chmod 755 "$HOME/.local/bin/codex-claude-mode"
 ### macOS Apple Silicon
 
 ```bash
-version="0.4.9"
+version="0.4.10"
 platform="macos-arm64"
 base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
 curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
@@ -176,7 +176,7 @@ Building requires Rust 1.95:
 ```bash
 git clone https://github.com/korkin25/codex-claude-mode.git
 cd codex-claude-mode || exit
-git checkout v0.4.9
+git checkout v0.4.10
 cargo build --locked --release
 target/release/codex-claude-mode --check-backend
 target/release/codex-claude-mode
@@ -194,7 +194,7 @@ target/release/codex-claude-mode
   optional `pngpaste` utility on macOS. Text paste uses terminal bracketed-paste
   support and multiline text is shown as one compact placeholder.
 - Multi-provider orchestration, a durable agent bus, and remote integrations are
-  roadmap items, not features in v0.4.9.
+  roadmap items, not features in v0.4.10.
 
 To update, repeat the verified release download with a newer version. To
 uninstall:

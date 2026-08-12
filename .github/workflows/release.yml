@@ -72,10 +72,20 @@ jobs:
             "${version}" "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${PLATFORM}" \
             "$(rustc --version)" > "release/${package}/BUILD-METADATA"
           "release/${package}/codex-claude-mode" --version
-          shasum -a 256 "release/${package}/codex-claude-mode" > "release/${package}/SHA256SUMS"
+          (cd "release/${package}" && shasum -a 256 codex-claude-mode > SHA256SUMS)
           COPYFILE_DISABLE=1 tar -C release -cf "release/${package}.tar" "${package}"
           gzip -n "release/${package}.tar"
           shasum -a 256 "release/${package}.tar.gz" > "release/${package}.tar.gz.sha256"
+
+      - name: Verify packaged archive
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package="codex-claude-mode-${version}-${PLATFORM}"
+          mkdir -p verify
+          tar -C verify -xzf "release/${package}.tar.gz"
+          (cd "verify/${package}" && shasum -a 256 -c SHA256SUMS)
 
       - name: Upload package
         uses: actions/upload-artifact@v4
