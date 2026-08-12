@@ -110,4 +110,5 @@ reuses them for its own user or host authentication.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for accepted architecture and future
 remote constraints, [MULTI_AGENT_SPEC.md](MULTI_AGENT_SPEC.md) for requirements,
 [ROADMAP.md](ROADMAP.md) for phases and gates, and [TODO.md](TODO.md) for atomic
-task status.
+task status. [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) records the current
+Linux/macOS evidence, gaps, required CI matrix and manual smoke checks.

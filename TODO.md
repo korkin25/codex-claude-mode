@@ -49,7 +49,6 @@ evidence релиза.
   `0.4.7` hashes and timestamp recorded separately from the post-package dirty
   tree; 72 baseline tests pass. `G0` remains open because macOS evidence is not
   yet available.
-  commit/tag or macOS evidence exists.
 - Size: `S`
 
 ### CCM-BASE-004 — Commit a verified direct-mode baseline
@@ -85,13 +84,16 @@ evidence релиза.
 ### SHARED-PLATFORM-001 — Establish the Linux/macOS baseline matrix
 
 - Repo owner: `SHARED`
-- Status: `ready`
+- Status: `done`
 - Phase: `P0`
 - Depends on: `CCM-BASE-002`
 - Outcome: обязательная OS/architecture/capability/test/release matrix.
 - Acceptance: gaps явно `unsupported/degraded`; product/tests не используют
   Linux-only shell/GNU assumptions; CI plan покрывает обе OS.
-- Evidence: pending.
+- Evidence: [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) records the capability
+  matrix, source audit, exact required CI jobs and manual smoke checklist.
+  Completion is planning evidence only: macOS/ARM64 runtime support remains
+  unverified and `G0` stays open.
 - Size: `M`
 
 ## P1 — Shared protocol contract
