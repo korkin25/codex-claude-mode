@@ -7,6 +7,12 @@ cleanup_root() {
 }
 trap cleanup_root 0 HUP INT TERM
 
+if [ -x /bin/true ]; then
+  true_binary=/bin/true
+else
+  true_binary=/usr/bin/true
+fi
+
 atomic_install() (
   src=$1
   dst=$2
@@ -37,15 +43,15 @@ destination=$test_root/codex-claude-mode
 cp /bin/sleep "$destination"
 "$destination" 2 &
 running_pid=$!
-cp /bin/true "$test_root/new"
+cp "$true_binary" "$test_root/new"
 atomic_install "$test_root/new" "$destination"
 "$destination"
 kill -0 "$running_pid"
 wait "$running_pid"
-cmp /bin/true "$destination"
+cmp "$true_binary" "$destination"
 cmp /bin/sleep "$destination.previous"
 
-cp /bin/true "$test_root/still-old"
+cp "$true_binary" "$test_root/still-old"
 cp "$test_root/still-old" "$destination"
 printf '#!/bin/sh\nexit 1\n' > "$test_root/invalid"
 chmod 755 "$test_root/invalid"
@@ -60,14 +66,14 @@ if find "$test_root" -name 'codex-claude-mode.new.*' | grep . >/dev/null; then
 fi
 
 cp /bin/sleep "$destination"
-cp /bin/true "$test_root/new"
+cp "$true_binary" "$test_root/new"
 atomic_install "$test_root/new" "$destination" &
 installer_pid=$!
 while kill -0 "$installer_pid" 2>/dev/null; do
-  if ! cmp -s /bin/sleep "$destination" && ! cmp -s /bin/true "$destination"; then
+  if ! cmp -s /bin/sleep "$destination" && ! cmp -s "$true_binary" "$destination"; then
     echo "destination contained a partial candidate" >&2
     exit 1
   fi
 done
 wait "$installer_pid"
-cmp /bin/true "$destination"
+cmp "$true_binary" "$destination"
