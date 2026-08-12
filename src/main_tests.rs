@@ -72,6 +72,47 @@ fn keeps_both_help_spellings_in_wrapper_arguments() {
 }
 
 #[test]
+fn keeps_codex_arguments_in_original_order_for_combined_help() {
+    let (wrapper, codex) =
+        split_args(["ccm", "--profile", "work", "--model=gpt-test", "--help"].map(OsString::from));
+
+    assert_eq!(wrapper, ["ccm", "--help"].map(OsString::from));
+    assert_eq!(
+        codex,
+        ["--profile", "work", "--model=gpt-test"].map(OsString::from)
+    );
+}
+
+#[test]
+fn delimiter_keeps_help_owned_by_codex() {
+    let (wrapper, codex) = split_args(["ccm", "--", "--help"].map(OsString::from));
+
+    assert_eq!(wrapper, ["ccm"].map(OsString::from));
+    assert_eq!(codex, ["--help"].map(OsString::from));
+}
+
+#[test]
+fn wrapper_value_options_remain_in_wrapper_arguments_when_missing() {
+    for option in ["--codex", "--codex-home", "--cwd", "--thread"] {
+        let (wrapper, codex) = split_args(["ccm", option].map(OsString::from));
+        assert_eq!(wrapper, ["ccm", option].map(OsString::from));
+        assert_eq!(codex, Vec::<OsString>::new());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preserves_non_utf8_codex_arguments() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_utf8 = OsString::from_vec(vec![b'x', 0xff]);
+    let (wrapper, codex) = split_args(vec!["ccm".into(), non_utf8.clone(), "--help".into()]);
+
+    assert_eq!(wrapper, ["ccm", "--help"].map(OsString::from));
+    assert_eq!(codex, vec![non_utf8]);
+}
+
+#[test]
 fn default_codex_home_uses_the_standard_home_directory() {
     assert_eq!(
         codex_home_from_home(PathBuf::from("/users/example")),

@@ -1000,6 +1000,51 @@ fn composer_preserves_spaces_and_moves_cursor_immediately() {
 }
 
 #[test]
+fn rendered_cursor_advances_across_spaces_and_unicode_immediately() {
+    let mut workspace = Workspace::new();
+    workspace.mode = Mode::Editing;
+    let backend = TestBackend::new(12, 12);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    workspace.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render leading space");
+    let leading_cursor = terminal.get_cursor_position().expect("cursor position");
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell(leading_cursor)
+            .expect("cursor cell")
+            .bg,
+        ACCENT_CYAN
+    );
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+    let mut previous = None;
+
+    for character in ['a', ' ', ' ', '界', ' ', 'b', ' ', ' ', ' '] {
+        workspace.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| workspace.render(frame))
+            .expect("render composer input");
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        let cursor_cell = terminal
+            .backend()
+            .buffer()
+            .cell(cursor)
+            .expect("cursor cell");
+
+        assert_eq!(cursor_cell.bg, ACCENT_CYAN, "input: {:?}", workspace.input);
+        assert_ne!(Some(cursor), previous, "input: {:?}", workspace.input);
+        previous = Some(cursor);
+    }
+
+    assert_eq!(workspace.input, "a  界 b   ");
+}
+
+#[test]
 fn composer_preserves_space_at_wrapped_boundary() {
     assert_eq!(wrap_composer_input("abc ", 4), vec!["abc ", ""]);
     assert_eq!(composer_viewport("abc ", "abc ".len(), 4, 2), (0, 0, 1));

@@ -1201,6 +1201,9 @@ impl Workspace {
                 .saturating_add(1)
                 .saturating_add(cursor_row)
                 .min(self.composer_area.bottom().saturating_sub(2));
+            if let Some(cell) = frame.buffer_mut().cell_mut((cursor_x, cursor_y)) {
+                cell.set_fg(APP_BACKGROUND).set_bg(ACCENT_CYAN);
+            }
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }

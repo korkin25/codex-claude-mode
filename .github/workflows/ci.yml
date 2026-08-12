@@ -60,6 +60,9 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Test atomic installer
+        run: sh tests/atomic-install.sh
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

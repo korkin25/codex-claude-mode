@@ -55,8 +55,30 @@ curl -fLO "${base}/SHA256SUMS"
 grep "codex-claude-mode-${version}-${platform}.tar.gz" SHA256SUMS | sha256sum -c -
 tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
 mkdir -p "$HOME/.local/bin"
-cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
-chmod 755 "$HOME/.local/bin/codex-claude-mode"
+src="codex-claude-mode-${version}-${platform}/codex-claude-mode"
+dst="$HOME/.local/bin/codex-claude-mode"
+previous="${dst}.previous"
+tmp=$(mktemp "${dst}.new.XXXXXX") || exit 1
+backup_tmp=
+cleanup() {
+  [ -z "${tmp:-}" ] || rm -f "$tmp"
+  [ -z "${backup_tmp:-}" ] || rm -f "$backup_tmp"
+}
+trap cleanup 0 HUP INT TERM
+install -m 755 "$src" "$tmp" || exit 1
+"$tmp" --version >/dev/null || exit 1
+if [ -e "$dst" ]; then
+  backup_tmp=$(mktemp "${previous}.new.XXXXXX") || exit 1
+  if cp -p "$dst" "$backup_tmp" && mv -f "$backup_tmp" "$previous"; then
+    backup_tmp=
+    : # Best-effort backup completed without moving the live destination.
+  else
+    rm -f "$backup_tmp"
+    echo "warning: could not save $previous; continuing with atomic update" >&2
+  fi
+fi
+mv -f "$tmp" "$dst" || exit 1
+tmp=
 "$HOME/.local/bin/codex-claude-mode" --version
 "$HOME/.local/bin/codex-claude-mode" --check-backend
 "$HOME/.local/bin/codex-claude-mode"
@@ -73,8 +95,30 @@ curl -fLO "${base}/SHA256SUMS"
 grep "codex-claude-mode-${version}-${platform}.tar.gz" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
 mkdir -p "$HOME/.local/bin"
-cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
-chmod 755 "$HOME/.local/bin/codex-claude-mode"
+src="codex-claude-mode-${version}-${platform}/codex-claude-mode"
+dst="$HOME/.local/bin/codex-claude-mode"
+previous="${dst}.previous"
+tmp=$(mktemp "${dst}.new.XXXXXX") || exit 1
+backup_tmp=
+cleanup() {
+  [ -z "${tmp:-}" ] || rm -f "$tmp"
+  [ -z "${backup_tmp:-}" ] || rm -f "$backup_tmp"
+}
+trap cleanup 0 HUP INT TERM
+install -m 755 "$src" "$tmp" || exit 1
+"$tmp" --version >/dev/null || exit 1
+if [ -e "$dst" ]; then
+  backup_tmp=$(mktemp "${previous}.new.XXXXXX") || exit 1
+  if cp -p "$dst" "$backup_tmp" && mv -f "$backup_tmp" "$previous"; then
+    backup_tmp=
+    : # Best-effort backup completed without moving the live destination.
+  else
+    rm -f "$backup_tmp"
+    echo "warning: could not save $previous; continuing with atomic update" >&2
+  fi
+fi
+mv -f "$tmp" "$dst" || exit 1
+tmp=
 "$HOME/.local/bin/codex-claude-mode" --version
 "$HOME/.local/bin/codex-claude-mode" --check-backend
 "$HOME/.local/bin/codex-claude-mode"
@@ -107,6 +151,9 @@ Type `/` to browse supported client commands, including `/new`, `/resume`,
 Run `codex-claude-mode --help` for wrapper options and the selected Codex
 backend's original options. Useful wrapper options include `--codex`,
 `--codex-home`, `--cwd`, `--thread`, and `--check-backend`.
+Other options are forwarded to Codex in their original order. Use `--` to make
+all following options Codex-owned; for example, `codex-claude-mode -- --help`
+passes `--help` to Codex instead of showing the combined wrapper help.
 
 ## Keyboard shortcuts
 

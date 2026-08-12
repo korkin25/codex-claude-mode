@@ -146,7 +146,7 @@ fn main() -> Result<()> {
     let (wrapper_args, codex_args) = split_args(env::args_os());
     let args = Args::parse_from(wrapper_args);
     if args.combined_help {
-        print_combined_help(&args.codex)?;
+        print_combined_help(&args.codex, &codex_args)?;
         return Ok(());
     }
     let codex_home = args.codex_home.unwrap_or_else(default_codex_home);
@@ -225,12 +225,13 @@ fn split_args(args: impl IntoIterator<Item = OsString>) -> (Vec<OsString>, Vec<O
     (wrapper, codex)
 }
 
-fn print_combined_help(codex: &std::path::Path) -> Result<()> {
+fn print_combined_help(codex: &std::path::Path, codex_args: &[OsString]) -> Result<()> {
     use clap::CommandFactory;
 
     Args::command().print_help()?;
     println!("\n\nInstalled Codex options ({}):\n", codex.display());
     let status = Command::new(codex)
+        .args(codex_args)
         .arg("--help")
         .status()
         .with_context(|| format!("failed to run {} --help", codex.display()))?;
