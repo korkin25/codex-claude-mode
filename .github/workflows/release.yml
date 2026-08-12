@@ -106,7 +106,7 @@ jobs:
       - name: Build release checksum manifest
         run: |
           find release -name '*.tar.gz.sha256' -type f -print | sort | while IFS= read -r checksum; do
-            cat "${checksum}"
+            sed 's#  release/#  #' "${checksum}"
           done > release/SHA256SUMS
           test "$(find release -name '*.tar.gz' -type f | wc -l | tr -d ' ')" = "2"
 

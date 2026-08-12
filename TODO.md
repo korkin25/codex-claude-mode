@@ -119,7 +119,7 @@ evidence релиза.
 ### CCM-RELEASE-001 — Publish the verified 0.4.8 baseline
 
 - Repo owner: `CCM`
-- Status: `in-progress`
+- Status: `done`
 - Phase: `P0`
 - Depends on: `CCM-BASE-004`, `CCM-CI-001`
 - Outcome: immutable tag `v0.4.8` publishes Linux x86_64 and macOS ARM64
@@ -128,8 +128,13 @@ evidence релиза.
   Rust 1.95 fmt, tests, Clippy and release build; archives have OS/architecture
   names and a release-level SHA-256 manifest; GitHub Release uses the existing
   repository visibility and no local `dist` files.
-- Evidence: release workflow and version/docs change pending audit approval;
-  tag and GitHub Release must not be created before explicit go.
+- Evidence: annotated tag `v0.4.8` targets green commit `2f45c29`; CI run
+  [31561173580](https://github.com/korkin25/codex-claude-mode/actions/runs/31561173580)
+  and release run
+  [31561226338](https://github.com/korkin25/codex-claude-mode/actions/runs/31561226338)
+  pass on Linux x86_64 and macOS ARM64. The non-draft, non-prerelease
+  [GitHub Release](https://github.com/korkin25/codex-claude-mode/releases/tag/v0.4.8)
+  contains both archives and verified release-level checksums.
 - Size: `S`
 
 ## P1 — Shared protocol contract
