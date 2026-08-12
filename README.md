@@ -4,7 +4,82 @@ Standalone terminal frontend for the public Codex `app-server` protocol. It
 uses an already installed Codex as its backend and does not replace or patch
 that installation.
 
+This is experimental community software. It is not affiliated with, endorsed
+by or supported by OpenAI, Anthropic, Google, xAI, Microsoft or Anysphere.
+
+Prerequisites:
+
+- an installed `codex` CLI available on `PATH` and authenticated for normal
+  Codex use (`codex --version` must succeed);
+- a supported terminal on Linux x86_64 or macOS Apple Silicon;
+- Rust 1.95 only when building from source.
+
+## Install a release binary
+
+Release assets are published for Linux x86_64 and macOS ARM64. Intel macOS has
+no binary artifact and remains unverified. Install into the user-writable
+`~/.local/bin`; `sudo` is neither required nor recommended.
+
+Linux x86_64:
+
 ```bash
+version="0.4.8"
+platform="linux-x86_64"
+base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
+curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
+curl -fLO "${base}/SHA256SUMS"
+grep "codex-claude-mode-${version}-${platform}.tar.gz" SHA256SUMS | sha256sum -c -
+tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
+mkdir -p "$HOME/.local/bin"
+cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
+chmod 755 "$HOME/.local/bin/codex-claude-mode"
+codex --version
+"$HOME/.local/bin/codex-claude-mode" --version
+"$HOME/.local/bin/codex-claude-mode" --check-backend
+```
+
+macOS Apple Silicon:
+
+```bash
+version="0.4.8"
+platform="macos-arm64"
+base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
+curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
+curl -fLO "${base}/SHA256SUMS"
+grep "codex-claude-mode-${version}-${platform}.tar.gz" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
+mkdir -p "$HOME/.local/bin"
+cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
+chmod 755 "$HOME/.local/bin/codex-claude-mode"
+codex --version
+"$HOME/.local/bin/codex-claude-mode" --version
+"$HOME/.local/bin/codex-claude-mode" --check-backend
+```
+
+Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` if the directory is not
+already on `PATH`. The initial macOS archive is unsigned and not notarized. If
+Gatekeeper quarantines this verified download, remove quarantine narrowly from
+the installed binary—never recursively from a directory:
+
+```bash
+xattr -d com.apple.quarantine "$HOME/.local/bin/codex-claude-mode"
+```
+
+To update, repeat the verified download for the new version and replace that
+single binary. To uninstall:
+
+```bash
+rm "$HOME/.local/bin/codex-claude-mode"
+```
+
+## Build from source
+
+Install Rust 1.95, clone the repository and build the immutable release tag:
+
+```bash
+git clone https://github.com/korkin25/codex-claude-mode.git
+cd codex-claude-mode
+git checkout v0.4.8
 cargo build --release
 target/release/codex-claude-mode \
   --codex "$HOME/.local/bin/codex" \

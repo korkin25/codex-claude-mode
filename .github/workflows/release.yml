@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Package · ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x86_64
+            expected_arch: x86_64
+          - runner: macos-14
+            platform: macos-arm64
+            expected_arch: arm64
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+
+      - name: Select pinned Rust toolchain
+        run: rustup override set 1.95.0
+
+      - name: Cache Cargo inputs and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('Cargo.lock') }}
+
+      - name: Verify tag, version and architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          actual_arch="$(uname -m)"
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+          test "${actual_arch}" = "${EXPECTED_ARCH}"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+
+      - name: Verify and build
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked --release
+
+      - name: Package archive
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package="codex-claude-mode-${version}-${PLATFORM}"
+          mkdir -p "release/${package}"
+          cp target/release/codex-claude-mode "release/${package}/codex-claude-mode"
+          cp README.md CHANGELOG.md LICENSE "release/${package}/"
+          printf 'version=%s\ntag=%s\ncommit=%s\nplatform=%s\nrust=%s\n' \
+            "${version}" "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${PLATFORM}" \
+            "$(rustc --version)" > "release/${package}/BUILD-METADATA"
+          "release/${package}/codex-claude-mode" --version
+          shasum -a 256 "release/${package}/codex-claude-mode" > "release/${package}/SHA256SUMS"
+          COPYFILE_DISABLE=1 tar -C release -cf "release/${package}.tar" "${package}"
+          gzip -n "release/${package}.tar"
+          shasum -a 256 "release/${package}.tar.gz" > "release/${package}.tar.gz.sha256"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            release/*.tar.gz
+            release/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Build release checksum manifest
+        run: |
+          find release -name '*.tar.gz.sha256' -type f -print | sort | while IFS= read -r checksum; do
+            cat "${checksum}"
+          done > release/SHA256SUMS
+          test "$(find release -name '*.tar.gz' -type f | wc -l | tr -d ' ')" = "2"
+
+      - name: Publish immutable-tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.tar.gz release/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "codex-claude-mode ${GITHUB_REF_NAME#v}" \
+            --notes-file CHANGELOG.md

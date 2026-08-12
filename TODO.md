@@ -116,6 +116,22 @@ evidence релиза.
   SHA-256. Локально те же locked checks проходят на Linux с Rust 1.95.0.
 - Size: `S`
 
+### CCM-RELEASE-001 — Publish the verified 0.4.8 baseline
+
+- Repo owner: `CCM`
+- Status: `in-progress`
+- Phase: `P0`
+- Depends on: `CCM-BASE-004`, `CCM-CI-001`
+- Outcome: immutable tag `v0.4.8` publishes Linux x86_64 and macOS ARM64
+  archives, checksums and concise release notes through GitHub Actions.
+- Acceptance: package version and tag match; both platform jobs pass pinned
+  Rust 1.95 fmt, tests, Clippy and release build; archives have OS/architecture
+  names and a release-level SHA-256 manifest; GitHub Release uses the existing
+  repository visibility and no local `dist` files.
+- Evidence: release workflow and version/docs change pending audit approval;
+  tag and GitHub Release must not be created before explicit go.
+- Size: `S`
+
 ## P1 — Shared protocol contract
 
 ### SHARED-PROTO-001 — Specify bounded versioned envelopes

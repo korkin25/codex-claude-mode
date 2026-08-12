@@ -1,9 +1,12 @@
 [package]
 name = "codex-claude-mode"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
 license = "Apache-2.0"
 description = "A standalone multi-agent workspace for Codex"
+repository = "https://github.com/korkin25/codex-claude-mode"
+readme = "README.md"
+rust-version = "1.95"
 
 [dependencies]
 anyhow = "1"
