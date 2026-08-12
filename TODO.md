@@ -134,6 +134,27 @@ evidence релиза.
 
 ## P1 — Shared protocol contract
 
+### CCM-REMOTE-PREVIEW-001 — Specify a temporary paired remote observer
+
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: early preview after `P0` (parallel to `P1/P2`; does not satisfy `P8`)
+- Depends on: `CCM-BASE-004`, `CCM-CI-001`
+- Outcome: research/ADR for a localhost-only HTTP snapshot+SSE+PWA observer of
+  current direct-Codex state through a manually managed Tailscale Serve,
+  Cloudflare Tunnel or ngrok TLS tunnel.
+- Acceptance: read-only initial scope; paired/revocable bounded device access;
+  reconnect cursor, redaction and explicit security non-goals; Linux-first and
+  mandatory macOS support; provider-neutral envelopes can migrate to AOR
+  without preserving a second source of truth.
+- Evidence: [REMOTE_PREVIEW.md](REMOTE_PREVIEW.md); documentation-only change,
+  no listener or remote mutation implemented.
+- Size: `S`
+
+Follow-up implementation tasks must be created separately for the loopback
+observer, paired PWA and cross-platform hardening. They may not add mutations
+or claim `G8` without a new security decision.
+
 ### SHARED-PROTO-001 — Specify bounded versioned envelopes
 
 - Repo owner: `SHARED`

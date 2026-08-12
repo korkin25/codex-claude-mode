@@ -1328,26 +1328,61 @@ orchestrator ID не заменяются внешними thread ID.
 
 ### 9.1. ADR-кандидаты удалённого доступа
 
-Рассматривается конечный набор вариантов:
+Рассматривается конечный набор вариантов без зависимости от SSH. Временный
+direct-Codex read-only срез нормативно описан в
+[REMOTE_PREVIEW.md](REMOTE_PREVIEW.md):
 
-- **A — SSH stdio (рекомендуемый первый вариант):** клиент запускает либо
-  подключает protocol process через SSH; отдельный listening port отсутствует,
-  SSH даёт host/user authentication и шифрование.
-- **B — loopback Unix/TCP + SSH tunnel:** локальный daemon слушает только
-  loopback/Unix socket, SSH отвечает за reachability. Удобнее нескольких
-  клиентов, но требует lifecycle и защиты локального endpoint.
-- **C — HTTPS/WSS service:** mTLS для host/workload, OIDC для пользователей,
+- **A — Tailscale Serve (рекомендуемый закрытый PoC):** локальный gateway
+  слушает только loopback, Serve публикует его только внутри tailnet, применяет
+  grants и передаёт проверенные user identity/app-capability headers. Backend
+  доверяет этим headers только на loopback-соединении от Serve. Это минимальная
+  настройка для владельца и небольшой группы с установленным Tailscale client.
+- **B — Cloudflare Tunnel + Access (рекомендуемый clientless PoC):** исходящий
+  `cloudflared` публикует loopback gateway как HTTPS, а Access применяет OIDC,
+  allowlist/group/device policy, session lifetime и audit. Подходит для browser
+  и mobile без VPN-клиента. Quick Tunnel без Access не используется.
+- **C — ngrok + Traffic Policy (короткоживущие demo):** OAuth/OIDC и точный
+  email allowlist обязательны. Это самый быстрый share-link, но бесплатные
+  identity/traffic limits и зависимость от публичного endpoint делают его
+  запасным вариантом, а не постоянным control plane.
+- **D — ZeroTier/private overlay:** предоставляет приватную reachability и
+  network member authorization, но не достаточную per-user application identity.
+  Gateway всё равно реализует собственные sessions, RBAC и audit; поэтому для
+  этой задачи Tailscale Serve обычно требует меньше дополнительной работы.
+- **E — собственный HTTPS/WSS pairing gateway:** mTLS для host/workload, OIDC
+  или passkey/device pairing для пользователей,
   tenant/project RBAC и отдельный audit service. Нужен для web/multi-user, но
   существенно расширяет trust boundary и runtime dependencies.
-- **D — overlay network:** Tailscale/WireGuard-подобная сеть предоставляет
-  только reachability; поверх неё всё равно обязательны application identity,
-  RBAC, replay protection и audit. Overlay не считается авторизацией.
+
+Tailscale Funnel является публичным и, в отличие от Serve, не передаёт identity
+headers; поэтому Funnel допускается только поверх собственной полноценной
+application authentication и не используется для remote approvals по умолчанию.
+Ни один tunnel/overlay не публикует raw orchestrator daemon или provider socket:
+наружу доступен только ограниченный gateway API.
 
 Для любого варианта approval связывается с authenticated operator identity,
 role/policy revision, digest исходного запроса, выбранным решением, временем и
 causal event; stale/повторное решение отклоняется. Read-only наблюдение и
 mutating действия имеют разные права. Reconnect использует monotonic replay
 cursor, bounded retention, backpressure и snapshot+delta при устаревшем cursor.
+
+Рекомендуемая временная последовательность использует localhost-only HTTP
+snapshot+SSE gateway; внешний tunnel завершает TLS, но не заменяет application
+pairing:
+
+1. read-only status/logs через Tailscale Serve, затем approvals отдельной role;
+2. тот же gateway через Cloudflare Tunnel + Access для browser/mobile друзей;
+3. только после telemetry и threat tests — launch/cancel и файловые операции;
+4. собственный pairing gateway рассматривается, когда зависимость от внешнего
+   access proxy или client install становится измеримой проблемой.
+
+Официальные опорные документы: [Tailscale Serve и identity headers](https://tailscale.com/docs/features/tailscale-serve),
+[Tailscale Funnel](https://tailscale.com/kb/1223/funnel),
+[Cloudflare Access policies](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/),
+[Cloudflare Tunnel WebSocket support](https://developers.cloudflare.com/cloudflare-one/faq/cloudflare-tunnels-faq/),
+[ngrok authentication](https://ngrok.com/docs/guides/share-localhost/auth),
+[ngrok plan limits](https://ngrok.com/docs/pricing-limits/how-ngrok-charges) и
+[ZeroTier pricing/capabilities](https://www.zerotier.com/pricing/).
 
 Remote files открываются встроенно как явно помеченные snapshots либо через
 проверенный provider URI/local-root mapping. Внешний редактор не получает
@@ -1400,8 +1435,9 @@ orchestrator не может обещать их запрет, если OS уж�
 При отсутствии требуемой границы Run блокируется либо после явного решения
 работает с красным `UNSANDBOXED/DEGRADED` статусом.
 
-SSH stdio является первым remote transport и обязан работать с Linux и macOS в
-обеих ролях client/host, не предполагая одинаковую remote shell environment.
+Tailscale Serve является первым закрытым remote reachability profile, Cloudflare
+Tunnel + Access — первым clientless profile; оба обязаны работать с Linux и
+macOS host. Сам временный gateway остаётся loopback HTTP snapshot+SSE service.
 Handshake передаёт OS/arch/path/isolation/provider capabilities; protocol
 остаётся platform-neutral.
 
@@ -1810,10 +1846,11 @@ endpoint имеют отдельные stop gates и не следуют авт�
     не доказал parity. Fallback удаляется только после наблюдаемой совместимости,
     а не ради архитектурной чистоты.
 
-17. **Remote access откладывается до ADR.** Первый эксперимент — SSH stdio с
-    существующим protocol. HTTPS/WSS, host enrollment, mTLS/OIDC, AG-UI и
-    NATS/Redis/Temporal требуют отдельного threat model и измерений; ранний
-    network daemon преждевременно закрепил бы identity и tenancy ошибки.
+17. **Remote access вводится через узкий gateway, а не raw daemon.** Первый
+    закрытый эксперимент — loopback HTTP snapshot+SSE gateway через Tailscale Serve;
+    первый clientless эксперимент — тот же gateway через Cloudflare Tunnel +
+    Access. Собственный public listener, host enrollment, mTLS/passkey pairing,
+    AG-UI и NATS/Redis/Temporal требуют отдельного threat model и измерений.
 
 18. **Уникальная область продукта сохраняется узкой.** Среди рассмотренных
     решений нет единого слоя для живых локальных coding CLI разных вендоров,

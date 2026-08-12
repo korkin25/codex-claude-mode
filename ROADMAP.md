@@ -30,6 +30,8 @@ flowchart LR
   G6 --> P7["P7 Operator integrations"] --> G7{"G7"}
   G6 --> P8["P8 Remote access"] --> G8{"G8"}
   G7 --> P8
+  G0 -. "temporary read-only preview" .-> RP["CCM remote preview"]
+  RP -. "replace source after G2" .-> P8
 ```
 
 Текстовый critical path:
@@ -50,6 +52,7 @@ P0/G0 → P1/G1 → P2/G2 → P3/G3 → P4/G4 → P5/G5 → P6/G6
 | Platform parity | SHARED | каждый vertical slice | Gate не проходит без Linux/macOS evidence. |
 | Security and observability | SHARED | после появления соответствующей capability | Совет LLM не может переопределять deterministic policy. |
 | Optional integrations | CCM/AOR | после G6 | IDE, RAG, chat и SaaS не блокируют core MVP. |
+| Temporary remote preview | CCM | после G0, параллельно P1/P2 | Только loopback HTTP, read-only projection и внешний tunnel; не становится control plane. |
 
 ## Phases and gates
 
@@ -167,9 +170,9 @@ Release slices: `R7a IDE`, `R7b observability`, `R7c retrieval`, `R7d chat`,
 
 Owner: `SHARED`. Entry: `G6`, а для богатого remote UX также релевантный `G7`.
 
-- Принять Remote ADR; первым прототипом использовать SSH stdio с теми же
-  envelopes/cursor.
-- HTTPS/WSS, AG-UI, federation и network streams рассматривать только после
+- Принять Remote ADR на основе измерений временного CCM preview.
+- Перенести совместимые snapshot/event envelopes на authoritative AOR source;
+  mutations, AG-UI, federation и network streams рассматривать только после
   threat model и измерений.
 
 `G8`: identity, RBAC, approval attribution, revocation, retention, path mapping,
@@ -177,6 +180,15 @@ replay protection и backpressure проверены; Linux/macOS работаю
 host. Stop gate: нельзя публиковать listener до security review.
 
 Release slice: `R8 — secure remote preview`.
+
+### Early CCM remote preview (не gate core roadmap)
+
+После `G0` допускается отдельный эксперимент `CCM-REMOTE-PREVIEW-001`,
+описанный в [REMOTE_PREVIEW.md](REMOTE_PREVIEW.md): localhost-only HTTP
+snapshot+SSE, paired read-only PWA и вручную управляемый внешний TLS tunnel.
+Он не зависит от готовности AOR, не предоставляет mutations и не закрывает
+`G8`. После `G2` источник проекции заменяется AOR без изменения browser-facing
+cursor/envelope semantics.
 
 ## Scope rule
 
