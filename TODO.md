@@ -99,7 +99,7 @@ evidence релиза.
 ### CCM-CI-001 — Run the baseline CI and capture platform artifacts
 
 - Repo owner: `CCM`
-- Status: `in-progress`
+- Status: `done`
 - Phase: `P0`
 - Depends on: `SHARED-PLATFORM-001`
 - Outcome: каждый push и pull request проверяет direct-mode baseline на Linux
@@ -109,10 +109,11 @@ evidence релиза.
   `macos-14` выполняет те же проверки и явно подтверждает `arm64`; артефакты
   имеют OS/architecture в имени и SHA-256; workflow не использует GNU-only
   shell assumptions.
-- Evidence: `.github/workflows/ci.yml`; локально на Linux x86_64 с Rust 1.95.0
-  проходят `cargo fmt --all -- --check`, 72 tests,
-  `cargo clippy --locked --all-targets -- -D warnings` и locked release build.
-  macOS evidence появится только после успешного GitHub Actions run.
+- Evidence: `.github/workflows/ci.yml`; GitHub Actions run
+  [31557720447](https://github.com/korkin25/codex-claude-mode/actions/runs/31557720447)
+  на commit `29a7308` успешно выполнил 72 tests, fmt, Clippy и release build на
+  Linux x86_64 и macOS ARM64 и сохранил оба именованных binary artifacts с
+  SHA-256. Локально те же locked checks проходят на Linux с Rust 1.95.0.
 - Size: `S`
 
 ## P1 — Shared protocol contract

@@ -23,8 +23,8 @@ support evidence.
 
 | Capability | Linux x86_64 | Linux ARM64 | macOS x86_64 | macOS ARM64 | Current boundary or gap |
 |---|---|---|---|---|---|
-| Rust build, unit tests and Clippy | **Tested** with Rust 1.95.0: 72 tests | **Expected** | **Expected** | **Expected** | `CCM-CI-001` adds mandatory Linux x86_64 and macOS ARM64 jobs; macOS remains expected until that job succeeds. |
-| Release packaging | **Tested** only as historical `0.4.7` artifact; not reproducible from a tag | **Unverified** | **Unverified** | **Unverified** | Checksums exist only for Linux x86_64. No signing or provenance. |
+| Rust build, unit tests and Clippy | **Tested** with Rust 1.95.0: 72 tests and release build | **Expected** | **Expected** | **Tested** with Rust 1.95.0: 72 tests and release build | GitHub Actions run [31557720447](https://github.com/korkin25/codex-claude-mode/actions/runs/31557720447), commit `29a7308`. |
+| Release packaging | **Tested** as a CI binary artifact with SHA-256; historical `0.4.7` archive is not tied to a tag | **Unverified** | **Unverified** | **Tested** as a CI binary artifact with SHA-256 | Run `31557720447` artifacts: `codex-claude-mode-linux-x86_64` (`9126573489`) and `codex-claude-mode-macos-arm64` (`9126580756`). No signing, notarization or tag provenance. |
 | Direct Codex process and app-server JSONL | **Unverified** end to end | **Unverified** | **Unverified** | **Unverified** | Unit tests validate parsing/projections, not a supported Codex-version runtime matrix. Codex CLI availability is an external prerequisite. |
 | TUI raw mode, alternate screen, keyboard and mouse | **Unverified** manually | **Unverified** | **Expected** | **Expected** | Crossterm is portable, but panic/signal/child-exit restoration is not guarded or tested. Terminal behavior varies by emulator. |
 | Session picker, agent tree, logs, composer and approvals | **Tested** by unit/render tests | **Expected** | **Expected** | **Expected** | No macOS snapshots or live app-server smoke evidence. |
@@ -67,8 +67,8 @@ following assumptions still prevent a first-class macOS support claim:
 ## Required CI jobs
 
 The following jobs are the minimum gate for claiming source support. The first
-two are implemented by `.github/workflows/ci.yml`; a committed workflow is not
-runtime evidence until its named job succeeds.
+two are implemented by `.github/workflows/ci.yml` and passed in run
+[31557720447](https://github.com/korkin25/codex-claude-mode/actions/runs/31557720447).
 
 1. `linux-x86_64-rust` on a pinned Ubuntu runner and Rust 1.95.0:
    `cargo fmt --all -- --check`, `cargo test`, and
