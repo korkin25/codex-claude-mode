@@ -60,12 +60,47 @@ fn count_line_breaks(text: &str) -> usize {
     }
     count
 }
+
+fn push_text_input(inputs: &mut Vec<SubmissionInput>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(SubmissionInput::Text(previous)) = inputs.last_mut() {
+        previous.push_str(&text);
+    } else {
+        inputs.push(SubmissionInput::Text(text));
+    }
+}
+
+fn human_size(size: usize) -> String {
+    if size >= 1024 * 1024 {
+        format!("{:.1} MB", size as f64 / (1024 * 1024) as f64)
+    } else if size >= 1024 {
+        format!("{:.1} KB", size as f64 / 1024.0)
+    } else {
+        format!("{size} B")
+    }
+}
 const ACCENT_CYAN: Color = Color::Rgb(27, 181, 190);
 const ACCENT_GREEN: Color = Color::Rgb(63, 185, 128);
 const MUTED_TEXT: Color = Color::Rgb(132, 139, 141);
 const BORDER_MUTED: Color = Color::Rgb(73, 77, 78);
 const APPROVAL_BACKGROUND: Color = Color::Rgb(63, 52, 32);
 const APPROVAL_BORDER: Color = Color::Rgb(224, 170, 70);
+
+fn skill_query(text: &str, cursor: usize) -> Option<(usize, &str)> {
+    let start = text[..cursor]
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let token = &text[start..cursor];
+    let query = token.strip_prefix('$')?;
+    query
+        .chars()
+        .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
+        .then_some((start, query))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -76,7 +111,8 @@ pub(crate) enum Mode {
 pub(crate) enum Action {
     None,
     Quit,
-    Submit(String),
+    Submit(Submission),
+    PasteImage,
     SelectionChanged,
     ResolvePrompt(PromptResolution),
     Interrupt,
@@ -105,6 +141,32 @@ pub(crate) enum Action {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Submission {
+    pub(crate) displayed_text: String,
+    pub(crate) input: Vec<SubmissionInput>,
+}
+
+impl PartialEq<&str> for Submission {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self.input.as_slice(), [SubmissionInput::Text(text)] if text == other)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SubmissionInput {
+    Text(String),
+    LocalImage(PathBuf),
+    Skill { name: String, path: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SkillChoice {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) path: PathBuf,
+}
+
 struct SessionPicker {
     candidates: Vec<SessionCandidate>,
     selected: usize,
@@ -129,9 +191,35 @@ struct CompletionPopup {
     selected: usize,
 }
 
+struct SkillPopup {
+    start: usize,
+    end: usize,
+    candidates: Vec<usize>,
+    selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SkillBinding {
+    start: usize,
+    end: usize,
+    name: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ComposerState {
+    text: String,
+    skill_bindings: Vec<SkillBinding>,
+}
+
 struct PastedText {
     placeholder: String,
     text: String,
+}
+
+struct PastedImage {
+    placeholder: String,
+    path: PathBuf,
 }
 
 pub(crate) struct Workspace {
@@ -148,6 +236,9 @@ pub(crate) struct Workspace {
     permission_profiles: HashMap<String, String>,
     completion_cwd: PathBuf,
     completion_popup: Option<CompletionPopup>,
+    skills: Vec<SkillChoice>,
+    skill_popup: Option<SkillPopup>,
+    skill_bindings: Vec<SkillBinding>,
     backend_user_agent: Option<String>,
     codex_current_version: Option<String>,
     codex_latest_version: Option<String>,
@@ -157,10 +248,12 @@ pub(crate) struct Workspace {
     pub(crate) prompt: Option<ServerPrompt>,
     prompt_draft: Option<String>,
     prompt_draft_cursor: Option<usize>,
-    input_history: Vec<String>,
+    prompt_draft_skill_bindings: Vec<SkillBinding>,
+    input_history: Vec<ComposerState>,
     history_cursor: Option<usize>,
-    history_draft: String,
+    history_draft: ComposerState,
     pasted_texts: Vec<PastedText>,
+    pasted_images: Vec<PastedImage>,
     next_paste_number: usize,
     agent_window_start: usize,
     agent_hitboxes: Vec<(Rect, usize)>,
@@ -196,6 +289,9 @@ impl Workspace {
             permission_profiles: HashMap::new(),
             completion_cwd: std::env::current_dir().unwrap_or_default(),
             completion_popup: None,
+            skills: Vec::new(),
+            skill_popup: None,
+            skill_bindings: Vec::new(),
             backend_user_agent: None,
             codex_current_version: None,
             codex_latest_version: None,
@@ -205,10 +301,12 @@ impl Workspace {
             prompt: None,
             prompt_draft: None,
             prompt_draft_cursor: None,
+            prompt_draft_skill_bindings: Vec::new(),
             input_history: Vec::new(),
             history_cursor: None,
-            history_draft: String::new(),
+            history_draft: ComposerState::default(),
             pasted_texts: Vec::new(),
+            pasted_images: Vec::new(),
             next_paste_number: 1,
             agent_window_start: 0,
             agent_hitboxes: Vec::new(),
@@ -268,6 +366,11 @@ impl Workspace {
     pub(crate) fn set_completion_cwd(&mut self, cwd: PathBuf) {
         self.completion_cwd = cwd;
         self.completion_popup = None;
+    }
+
+    pub(crate) fn set_skills(&mut self, skills: Vec<SkillChoice>) {
+        self.skills = skills;
+        self.refresh_skill_popup();
     }
 
     pub(crate) fn set_backend_user_agent(&mut self, user_agent: &str) {
@@ -414,6 +517,30 @@ impl Workspace {
             }
             return Action::None;
         }
+        if self.skill_popup.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    let popup = self.skill_popup.as_mut().expect("skill popup");
+                    popup.selected = popup.selected.saturating_sub(1);
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    let popup = self.skill_popup.as_mut().expect("skill popup");
+                    popup.selected =
+                        (popup.selected + 1).min(popup.candidates.len().saturating_sub(1));
+                    return Action::None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.apply_selected_skill();
+                    return Action::None;
+                }
+                KeyCode::Esc => {
+                    self.skill_popup = None;
+                    return Action::None;
+                }
+                _ => self.skill_popup = None,
+            }
+        }
         if self.completion_popup.is_some() && command::matches(&self.input).is_empty() {
             match key.code {
                 KeyCode::Up => {
@@ -447,9 +574,10 @@ impl Workspace {
             let accepts_text = self.prompt.as_ref().is_some_and(ServerPrompt::accepts_text);
             if accepts_text || (self.prompt.is_none() && self.mode == Mode::Editing) {
                 self.input.clear();
+                self.skill_bindings.clear();
                 self.input_cursor = None;
                 self.history_cursor = None;
-                self.history_draft.clear();
+                self.history_draft = ComposerState::default();
                 self.slash_selected = 0;
             }
             return Action::None;
@@ -600,6 +728,7 @@ impl Workspace {
                         KeyCode::Enter | KeyCode::Tab => {
                             let selected = self.slash_selected.min(slash_matches.len() - 1);
                             self.input = format!("/{} ", slash_matches[selected].name);
+                            self.skill_bindings.clear();
                             self.input_cursor = None;
                             self.slash_selected = 0;
                             return Action::None;
@@ -609,22 +738,33 @@ impl Workspace {
                 }
                 match key.code {
                     KeyCode::Esc => self.mode = Mode::Navigation,
+                    KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        return Action::PasteImage;
+                    }
                     KeyCode::Left => {
                         self.move_cursor_left();
+                        self.refresh_skill_popup();
                     }
                     KeyCode::Right => {
                         self.move_cursor_right();
+                        self.refresh_skill_popup();
                     }
                     KeyCode::Enter if !self.input.trim().is_empty() => {
                         let displayed_input = std::mem::take(&mut self.input);
                         self.input_cursor = None;
-                        if self.input_history.last() != Some(&displayed_input) {
-                            self.input_history.push(displayed_input.clone());
+                        let history_entry = ComposerState {
+                            text: displayed_input.clone(),
+                            skill_bindings: self.skill_bindings.clone(),
+                        };
+                        if self.input_history.last() != Some(&history_entry) {
+                            self.input_history.push(history_entry);
                         }
                         self.history_cursor = None;
-                        self.history_draft.clear();
+                        self.history_draft = ComposerState::default();
                         self.mode = Mode::Navigation;
-                        return Action::Submit(self.expand_pasted_text(&displayed_input));
+                        let submission = self.build_submission(displayed_input);
+                        self.skill_bindings.clear();
+                        return Action::Submit(submission);
                     }
                     KeyCode::Tab => {
                         self.start_completion();
@@ -633,6 +773,7 @@ impl Workspace {
                         self.backspace_at_cursor();
                         self.history_cursor = None;
                         self.slash_selected = 0;
+                        self.refresh_skill_popup();
                     }
                     KeyCode::Up => self.older_input(),
                     KeyCode::Down => self.newer_input(),
@@ -644,6 +785,7 @@ impl Workspace {
                         self.insert_at_cursor(&character.to_string());
                         self.history_cursor = None;
                         self.slash_selected = 0;
+                        self.refresh_skill_popup();
                     }
                     _ => {}
                 }
@@ -722,6 +864,21 @@ impl Workspace {
         self.slash_selected = 0;
         self.completion_popup = None;
         Action::None
+    }
+
+    pub(crate) fn attach_image(&mut self, path: PathBuf, format: &str, size: usize) {
+        let placeholder = format!(
+            "[Image #{} {format} {}]",
+            self.pasted_images.len() + 1,
+            human_size(size)
+        );
+        self.insert_at_cursor(&placeholder);
+        self.pasted_images.push(PastedImage { placeholder, path });
+        self.mode = Mode::Editing;
+        self.history_cursor = None;
+        self.completion_popup = None;
+        self.skill_popup = None;
+        self.refresh_skill_popup();
     }
 
     pub(crate) fn handle_mouse(&mut self, event: MouseEvent) -> Action {
@@ -1015,6 +1172,7 @@ impl Workspace {
 
         self.render_completion_menu(frame);
         self.render_slash_menu(frame);
+        self.render_skill_menu(frame);
 
         self.render_agent_bar(frame);
         self.render_metrics(frame, footer[1]);
@@ -1140,6 +1298,60 @@ impl Workspace {
                     .border_style(Style::default().fg(ACCENT_CYAN))
                     .style(Style::default().bg(APP_BACKGROUND))
                     .title(" Completions ")
+                    .title_bottom(" ↑/↓ select · Enter/Tab insert · Esc close "),
+            ),
+            area,
+        );
+    }
+
+    fn render_skill_menu(&self, frame: &mut Frame) {
+        let Some(popup) = self.skill_popup.as_ref() else {
+            return;
+        };
+        if self.mode != Mode::Editing || self.prompt.is_some() {
+            return;
+        }
+        let visible = popup.candidates.len().min(8);
+        let height = (visible as u16).saturating_add(2);
+        let area = Rect::new(
+            self.composer_area.x,
+            self.composer_area.y.saturating_sub(height),
+            self.composer_area.width,
+            height.min(self.composer_area.y),
+        );
+        if area.height < 2 {
+            return;
+        }
+        let selected = popup.selected.min(popup.candidates.len().saturating_sub(1));
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let lines = popup
+            .candidates
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, skill_index)| {
+                let skill = &self.skills[*skill_index];
+                let style = if index == selected {
+                    Style::default().bg(SELECTED_BACKGROUND).bold()
+                } else {
+                    Style::default().bg(APP_BACKGROUND)
+                };
+                styled_full_line(
+                    format!(" ${:<20} {}", skill.name, skill.description),
+                    area.width.saturating_sub(2),
+                    style,
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT_CYAN))
+                    .style(Style::default().bg(APP_BACKGROUND))
+                    .title(" Skills ")
                     .title_bottom(" ↑/↓ select · Enter/Tab insert · Esc close "),
             ),
             area,
@@ -1478,7 +1690,9 @@ impl Workspace {
         }
         self.prompt_draft = Some(std::mem::take(&mut self.input));
         self.prompt_draft_cursor = self.input_cursor.take();
+        self.prompt_draft_skill_bindings = std::mem::take(&mut self.skill_bindings);
         self.completion_popup = None;
+        self.skill_popup = None;
         self.info_open = false;
         self.suspended_permission_picker = self.permission_picker.take();
         self.patch_open = false;
@@ -1495,12 +1709,17 @@ impl Workspace {
         let index = match self.history_cursor {
             Some(index) => index.saturating_sub(1),
             None => {
-                self.history_draft.clone_from(&self.input);
+                self.history_draft = ComposerState {
+                    text: self.input.clone(),
+                    skill_bindings: self.skill_bindings.clone(),
+                };
                 self.input_history.len() - 1
             }
         };
         self.history_cursor = Some(index);
-        self.input.clone_from(&self.input_history[index]);
+        self.input.clone_from(&self.input_history[index].text);
+        self.skill_bindings
+            .clone_from(&self.input_history[index].skill_bindings);
         self.input_cursor = None;
     }
 
@@ -1512,6 +1731,7 @@ impl Workspace {
 
     fn insert_at_cursor(&mut self, text: &str) {
         let cursor = self.actual_input_cursor();
+        self.update_skill_bindings_for_edit(cursor, cursor, text.len());
         self.input.insert_str(cursor, text);
         self.input_cursor = Some(cursor + text.len());
     }
@@ -1541,8 +1761,21 @@ impl Workspace {
         let Some((previous, _)) = self.input[..cursor].char_indices().next_back() else {
             return;
         };
+        self.update_skill_bindings_for_edit(previous, cursor, 0);
         self.input.replace_range(previous..cursor, "");
         self.input_cursor = Some(previous);
+    }
+
+    fn update_skill_bindings_for_edit(&mut self, start: usize, end: usize, replacement_len: usize) {
+        self.skill_bindings
+            .retain(|binding| binding.end <= start || binding.start >= end);
+        let removed = end - start;
+        for binding in &mut self.skill_bindings {
+            if binding.start >= end {
+                binding.start = binding.start - removed + replacement_len;
+                binding.end = binding.end - removed + replacement_len;
+            }
+        }
     }
 
     fn newer_input(&mut self) {
@@ -1551,11 +1784,15 @@ impl Workspace {
         };
         if index + 1 < self.input_history.len() {
             self.history_cursor = Some(index + 1);
-            self.input.clone_from(&self.input_history[index + 1]);
+            self.input.clone_from(&self.input_history[index + 1].text);
+            self.skill_bindings
+                .clone_from(&self.input_history[index + 1].skill_bindings);
             self.input_cursor = None;
         } else {
             self.history_cursor = None;
-            self.input.clone_from(&self.history_draft);
+            self.input.clone_from(&self.history_draft.text);
+            self.skill_bindings
+                .clone_from(&self.history_draft.skill_bindings);
             self.input_cursor = None;
         }
     }
@@ -1566,6 +1803,7 @@ impl Workspace {
         match completion.candidates.as_slice() {
             [] => self.completion_popup = None,
             [candidate] => {
+                self.update_skill_bindings_for_edit(completion.start, end, candidate.len());
                 self.input.replace_range(completion.start..end, candidate);
                 self.input_cursor = Some(completion.start + candidate.len());
                 self.completion_popup = None;
@@ -1582,28 +1820,64 @@ impl Workspace {
         }
     }
 
-    fn expand_pasted_text(&self, input: &str) -> String {
-        let mut expanded = String::with_capacity(input.len());
+    fn build_submission(&self, displayed_text: String) -> Submission {
+        let mut inputs = Vec::new();
+        let mut expanded = String::with_capacity(displayed_text.len());
         let mut cursor = 0;
-        while cursor < input.len() {
-            let next = self
+        while cursor < displayed_text.len() {
+            let next_text = self
                 .pasted_texts
                 .iter()
                 .filter_map(|paste| {
-                    input[cursor..]
+                    displayed_text[cursor..]
                         .find(&paste.placeholder)
-                        .map(|offset| (cursor + offset, paste))
+                        .map(|offset| (cursor + offset, paste, false))
+                })
+                .min_by_key(|(offset, _, _)| *offset);
+            let next_image = self
+                .pasted_images
+                .iter()
+                .filter_map(|image| {
+                    displayed_text[cursor..]
+                        .find(&image.placeholder)
+                        .map(|offset| (cursor + offset, image))
                 })
                 .min_by_key(|(offset, _)| *offset);
-            let Some((offset, paste)) = next else {
-                expanded.push_str(&input[cursor..]);
+            let next_is_image = match (next_text.as_ref(), next_image.as_ref()) {
+                (Some((text_offset, _, _)), Some((image_offset, _))) => image_offset < text_offset,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if next_is_image {
+                let (offset, image) = next_image.expect("image candidate exists");
+                expanded.push_str(&displayed_text[cursor..offset]);
+                push_text_input(&mut inputs, std::mem::take(&mut expanded));
+                inputs.push(SubmissionInput::LocalImage(image.path.clone()));
+                cursor = offset + image.placeholder.len();
+                continue;
+            }
+            let Some((offset, paste, _)) = next_text else {
+                expanded.push_str(&displayed_text[cursor..]);
                 break;
             };
-            expanded.push_str(&input[cursor..offset]);
+            expanded.push_str(&displayed_text[cursor..offset]);
             expanded.push_str(&paste.text);
             cursor = offset + paste.placeholder.len();
         }
-        expanded
+        push_text_input(&mut inputs, expanded);
+        for binding in &self.skill_bindings {
+            let mention = format!("${}", binding.name);
+            if displayed_text.get(binding.start..binding.end) == Some(mention.as_str()) {
+                inputs.push(SubmissionInput::Skill {
+                    name: binding.name.clone(),
+                    path: binding.path.clone(),
+                });
+            }
+        }
+        Submission {
+            displayed_text,
+            input: inputs,
+        }
     }
 
     fn apply_selected_completion(&mut self) {
@@ -1613,8 +1887,65 @@ impl Workspace {
         let Some(candidate) = popup.candidates.get(popup.selected) else {
             return;
         };
+        self.update_skill_bindings_for_edit(popup.start, popup.end, candidate.len());
         self.input.replace_range(popup.start..popup.end, candidate);
         self.input_cursor = Some(popup.start + candidate.len());
+        self.history_cursor = None;
+    }
+
+    fn refresh_skill_popup(&mut self) {
+        if self.prompt.is_some() || self.mode != Mode::Editing {
+            self.skill_popup = None;
+            return;
+        }
+        let end = self.actual_input_cursor();
+        let Some((start, query)) = skill_query(&self.input, end) else {
+            self.skill_popup = None;
+            return;
+        };
+        let query = query.to_ascii_lowercase();
+        let candidates = self
+            .skills
+            .iter()
+            .enumerate()
+            .filter(|(_, skill)| skill.name.to_ascii_lowercase().starts_with(&query))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            self.skill_popup = None;
+        } else {
+            let selected = self
+                .skill_popup
+                .as_ref()
+                .map_or(0, |popup| popup.selected.min(candidates.len() - 1));
+            self.skill_popup = Some(SkillPopup {
+                start,
+                end,
+                candidates,
+                selected,
+            });
+            self.completion_popup = None;
+        }
+    }
+
+    fn apply_selected_skill(&mut self) {
+        let Some(popup) = self.skill_popup.take() else {
+            return;
+        };
+        let Some(skill_index) = popup.candidates.get(popup.selected) else {
+            return;
+        };
+        let replacement = format!("${} ", self.skills[*skill_index].name);
+        self.update_skill_bindings_for_edit(popup.start, popup.end, replacement.len());
+        self.input
+            .replace_range(popup.start..popup.end, &replacement);
+        self.skill_bindings.push(SkillBinding {
+            start: popup.start,
+            end: popup.start + replacement.len() - 1,
+            name: self.skills[*skill_index].name.clone(),
+            path: self.skills[*skill_index].path.clone(),
+        });
+        self.input_cursor = Some(popup.start + replacement.len());
         self.history_cursor = None;
     }
 
@@ -1633,6 +1964,7 @@ impl Workspace {
         self.patch_open = false;
         self.input = self.prompt_draft.take().unwrap_or_default();
         self.input_cursor = self.prompt_draft_cursor.take();
+        self.skill_bindings = std::mem::take(&mut self.prompt_draft_skill_bindings);
         if let Some(picker) = self.suspended_permission_picker.take() {
             if self.threads.contains_key(&picker.target_id) {
                 self.permission_picker = Some(picker);
@@ -1656,6 +1988,7 @@ impl Workspace {
         }
         self.mode = Mode::Editing;
         self.input = "Start a new sub-agent for this task: ".to_string();
+        self.skill_bindings.clear();
         self.input_cursor = None;
         self.history_cursor = None;
         self.scroll = u16::MAX;

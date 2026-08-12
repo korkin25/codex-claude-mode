@@ -1,4 +1,5 @@
 mod backend;
+mod clipboard;
 mod command;
 mod editor;
 mod model;
@@ -31,7 +32,9 @@ use backend::Backend;
 use backend::BackendEvent;
 use clap::Parser;
 use crossterm::event;
+use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableMouseCapture;
+use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableMouseCapture;
 use crossterm::event::Event;
 use crossterm::execute;
@@ -50,6 +53,9 @@ use serde_json::json;
 use session::candidates_from_list;
 use ui::Action;
 use ui::PermissionChoice;
+use ui::SkillChoice;
+use ui::Submission;
+use ui::SubmissionInput;
 use ui::Workspace;
 
 const SOURCE_KINDS: &[&str] = &[
@@ -102,12 +108,14 @@ enum Pending {
     Start,
     ResumeAndSend {
         target_id: String,
-        text: String,
+        submission: Submission,
     },
     Turn,
     Interrupt,
     Command(String),
-    Skills,
+    Skills {
+        announce: bool,
+    },
     Permissions {
         target_id: String,
         requested: Option<String>,
@@ -130,6 +138,8 @@ struct App {
     codex: PathBuf,
     codex_home: PathBuf,
     update_result: Option<Receiver<std::result::Result<String, String>>>,
+    clipboard_images: clipboard::ClipboardImages,
+    clipboard_capture: Option<clipboard::ClipboardCapture>,
 }
 
 fn main() -> Result<()> {
@@ -167,6 +177,8 @@ fn main() -> Result<()> {
         codex: args.codex,
         codex_home,
         update_result: None,
+        clipboard_images: clipboard::ClipboardImages::new(),
+        clipboard_capture: None,
     };
     run_terminal(&mut app)
 }
@@ -298,17 +310,33 @@ fn check_backend(
 fn run_terminal(app: &mut App) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    enter_terminal(&mut stdout)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     let result = run_event_loop(app, &mut terminal);
     disable_raw_mode()?;
+    leave_terminal(terminal.backend_mut())?;
+    terminal.show_cursor()?;
+    result
+}
+
+fn enter_terminal(writer: &mut impl io::Write) -> Result<()> {
     execute!(
-        terminal.backend_mut(),
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+    Ok(())
+}
+
+fn leave_terminal(writer: &mut impl io::Write) -> Result<()> {
+    execute!(
+        writer,
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
-    terminal.show_cursor()?;
-    result
+    Ok(())
 }
 
 fn run_event_loop(
@@ -320,6 +348,7 @@ fn run_event_loop(
             app.handle_backend_event(event)?;
         }
         app.poll_codex_update();
+        app.poll_clipboard_capture();
         if app.session_decided
             && !app.starting_new_session
             && app.last_refresh.elapsed() >= Duration::from_secs(2)
@@ -342,7 +371,8 @@ fn run_event_loop(
         };
         match action {
             Action::Quit => return Ok(()),
-            Action::Submit(text) => app.submit(text)?,
+            Action::Submit(submission) => app.submit(submission)?,
+            Action::PasteImage => app.start_clipboard_capture(),
             Action::SelectionChanged => app.read_selected()?,
             Action::ResolvePrompt(resolution) => app.resolve_prompt(resolution)?,
             Action::Interrupt => app.interrupt_selected()?,
@@ -406,13 +436,9 @@ fn open_external_editor(
 
 fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    if let Err(error) = execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    ) {
+    if let Err(error) = suspend_terminal_features(terminal.backend_mut()) {
         let _ = enable_raw_mode();
-        return Err(error.into());
+        return Err(error);
     }
     if let Err(error) = terminal.show_cursor() {
         let _ = resume_terminal(terminal);
@@ -423,16 +449,65 @@ fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 
 fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture
-    )?;
+    resume_terminal_features(terminal.backend_mut())?;
     terminal.clear()?;
     Ok(())
 }
 
+fn suspend_terminal_features(writer: &mut impl io::Write) -> Result<()> {
+    execute!(
+        writer,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+    Ok(())
+}
+
+fn resume_terminal_features(writer: &mut impl io::Write) -> Result<()> {
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+    Ok(())
+}
+
 impl App {
+    fn start_clipboard_capture(&mut self) {
+        if self.clipboard_capture.is_some() {
+            self.workspace.status_line = "reading image from clipboard…".to_string();
+            return;
+        }
+        self.clipboard_capture = Some(clipboard::ClipboardImages::capture_in_background());
+        self.workspace.status_line = "reading image from clipboard…".to_string();
+    }
+
+    fn poll_clipboard_capture(&mut self) {
+        let Some(receiver) = self.clipboard_capture.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.clipboard_capture = None;
+                self.workspace.status_line = "clipboard image worker stopped".to_string();
+                return;
+            }
+        };
+        self.clipboard_capture = None;
+        match result.and_then(|captured| self.clipboard_images.store(captured)) {
+            Ok(image) => {
+                self.workspace
+                    .attach_image(image.path, image.format, image.size);
+                self.workspace.status_line = "image pasted from clipboard".to_string();
+            }
+            Err(error) => self.workspace.status_line = error.to_string(),
+        }
+    }
+
     fn start_codex_update(&mut self) {
         if self.update_result.is_some() {
             return;
@@ -549,6 +624,7 @@ impl App {
                         .and_then(Value::as_str)
                         .unwrap_or("Codex")
                 );
+                self.request_skills(false, false)?;
                 self.request_list()?;
             }
             Pending::List => self.apply_list(result)?,
@@ -574,7 +650,10 @@ impl App {
                     self.workspace.status_line = "new Main thread ready".to_string();
                 }
             }
-            Pending::ResumeAndSend { target_id, text } => self.start_turn(&target_id, &text)?,
+            Pending::ResumeAndSend {
+                target_id,
+                submission,
+            } => self.start_turn(&target_id, &submission.input)?,
             Pending::Turn => {}
             Pending::Interrupt => {
                 self.workspace.status_line = "turn interrupted".to_string();
@@ -582,7 +661,7 @@ impl App {
             Pending::Command(label) => {
                 self.workspace.status_line = format!("/{label} completed");
             }
-            Pending::Skills => self.show_skills(result),
+            Pending::Skills { announce } => self.show_skills(result, announce),
             Pending::Permissions {
                 target_id,
                 requested,
@@ -762,8 +841,11 @@ impl App {
         Ok(())
     }
 
-    fn submit(&mut self, text: String) -> Result<()> {
-        if let Some(command) = command::parse(&text) {
+    fn submit(&mut self, submission: Submission) -> Result<()> {
+        if submission.input.len() == 1
+            && let Some(SubmissionInput::Text(text)) = submission.input.first()
+            && let Some(command) = command::parse(text)
+        {
             return self.run_slash_command(command.name, command.args);
         }
         let Some(selected) = self.workspace.selected_thread() else {
@@ -786,7 +868,7 @@ impl App {
             return Ok(());
         }
         if let Some(thread) = self.workspace.threads.get_mut(&selected_id) {
-            thread.push_user_message(text.clone());
+            thread.push_user_message(submission.displayed_text.clone());
         }
         let target_id = selected_id;
         let can_send = self
@@ -795,13 +877,18 @@ impl App {
             .get(&target_id)
             .is_some_and(|thread| thread.can_accept_direct_input);
         if can_send {
-            self.start_turn(&target_id, &text)
+            self.start_turn(&target_id, &submission.input)
         } else {
             let id = self
                 .backend
                 .request("thread/resume", json!({"threadId": target_id}))?;
-            self.pending
-                .insert(id, Pending::ResumeAndSend { target_id, text });
+            self.pending.insert(
+                id,
+                Pending::ResumeAndSend {
+                    target_id,
+                    submission,
+                },
+            );
             Ok(())
         }
     }
@@ -814,11 +901,7 @@ impl App {
             "new" | "clear" => return self.select_session(None),
             "resume" => return self.choose_session(),
             "skills" => {
-                let id = self.backend.request(
-                    "skills/list",
-                    json!({"cwds": [self.cwd.to_string_lossy()], "forceReload": true}),
-                )?;
-                self.pending.insert(id, Pending::Skills);
+                self.request_skills(true, true)?;
                 self.workspace.status_line = "loading skills…".to_string();
                 return Ok(());
             }
@@ -872,15 +955,17 @@ impl App {
                 } else {
                     args
                 };
-                return self.start_turn(&thread_id, prompt);
+                return self.start_text_turn(&thread_id, prompt);
             }
             "init" => {
-                return self.start_turn(
+                return self.start_text_turn(
                     &thread_id,
                     "Create an AGENTS.md file with instructions for Codex in this repository.",
                 );
             }
-            "diff" => return self.start_turn(&thread_id, "Show and explain the current git diff."),
+            "diff" => {
+                return self.start_text_turn(&thread_id, "Show and explain the current git diff.");
+            }
             "quit" | "exit" => {
                 self.workspace.status_line = "press Ctrl-Q to quit".to_string();
                 return Ok(());
@@ -902,8 +987,17 @@ impl App {
         Ok(())
     }
 
-    fn show_skills(&mut self, result: &Value) {
-        let names = result
+    fn request_skills(&mut self, force_reload: bool, announce: bool) -> Result<()> {
+        let id = self.backend.request(
+            "skills/list",
+            json!({"cwds": [self.cwd.to_string_lossy()], "forceReload": force_reload}),
+        )?;
+        self.pending.insert(id, Pending::Skills { announce });
+        Ok(())
+    }
+
+    fn show_skills(&mut self, result: &Value, announce: bool) {
+        let skills = result
             .pointer("/data/0/skills")
             .and_then(Value::as_array)
             .into_iter()
@@ -914,14 +1008,34 @@ impl App {
                     .and_then(Value::as_bool)
                     .unwrap_or(true)
             })
-            .filter_map(|skill| skill.get("name").and_then(Value::as_str))
-            .map(|name| format!("${name}"))
+            .filter_map(|skill| {
+                Some(SkillChoice {
+                    name: skill.get("name")?.as_str()?.to_string(),
+                    description: skill
+                        .pointer("/interface/shortDescription")
+                        .or_else(|| skill.get("description"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    path: skill.get("path")?.as_str()?.into(),
+                })
+            })
             .collect::<Vec<_>>();
-        self.workspace.status_line = if names.is_empty() {
-            "no enabled skills found for this workspace".to_string()
-        } else {
-            format!("skills: {}", names.join("  "))
-        };
+        if announce {
+            self.workspace.status_line = if skills.is_empty() {
+                "no enabled skills found for this workspace".to_string()
+            } else {
+                format!(
+                    "skills: {}",
+                    skills
+                        .iter()
+                        .map(|skill| format!("${}", skill.name))
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                )
+            };
+        }
+        self.workspace.set_skills(skills);
     }
 
     fn show_permissions(
@@ -1016,17 +1130,21 @@ impl App {
         Ok(())
     }
 
-    fn start_turn(&mut self, thread_id: &str, text: &str) -> Result<()> {
+    fn start_turn(&mut self, thread_id: &str, input: &[SubmissionInput]) -> Result<()> {
         let id = self.backend.request(
             "turn/start",
             turn_start_params(
                 thread_id,
-                text,
+                input,
                 self.permission_profiles.get(thread_id).map(String::as_str),
             ),
         )?;
         self.pending.insert(id, Pending::Turn);
         Ok(())
+    }
+
+    fn start_text_turn(&mut self, thread_id: &str, text: &str) -> Result<()> {
+        self.start_turn(thread_id, &[SubmissionInput::Text(text.to_string())])
     }
 
     fn resolve_prompt(&mut self, resolution: PromptResolution) -> Result<()> {
@@ -1081,6 +1199,7 @@ impl App {
             }
             "turn/started" => self.start_notified_turn(params),
             "turn/completed" => self.complete_notified_turn(params),
+            "skills/changed" => self.request_skills(true, false)?,
             "serverRequest/resolved" => {
                 if let Some(request_id) = params.get("requestId") {
                     self.workspace.clear_prompt(request_id);
@@ -1210,10 +1329,28 @@ fn permission_update_params(thread_id: &str, profile_id: &str) -> Value {
     })
 }
 
-fn turn_start_params(thread_id: &str, text: &str, permissions: Option<&str>) -> Value {
+fn turn_start_params(
+    thread_id: &str,
+    input: &[SubmissionInput],
+    permissions: Option<&str>,
+) -> Value {
+    let input = input
+        .iter()
+        .map(|item| match item {
+            SubmissionInput::Text(text) => {
+                json!({"type": "text", "text": text, "textElements": []})
+            }
+            SubmissionInput::LocalImage(path) => {
+                json!({"type": "localImage", "path": path})
+            }
+            SubmissionInput::Skill { name, path } => {
+                json!({"type": "skill", "name": name, "path": path})
+            }
+        })
+        .collect::<Vec<_>>();
     json!({
         "threadId": thread_id,
-        "input": [{"type": "text", "text": text, "textElements": []}],
+        "input": input,
         "permissions": permissions
     })
 }

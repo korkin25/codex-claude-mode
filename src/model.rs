@@ -484,15 +484,33 @@ fn is_routed_transport_turn(turn: &Value) -> bool {
 }
 
 fn user_message_text(item: &Value) -> Option<String> {
-    Some(
-        item.get("content")?
-            .as_array()?
-            .iter()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    let mut image_number = 0;
+    let parts = item
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str)? {
+            "text" => part.get("text").and_then(Value::as_str).map(str::to_string),
+            "image" => {
+                image_number += 1;
+                Some(format!("[Image #{image_number}]"))
+            }
+            "localImage" => {
+                image_number += 1;
+                let name = part
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .and_then(|path| std::path::Path::new(path).file_name())
+                    .and_then(|name| name.to_str());
+                Some(name.map_or_else(
+                    || format!("[Image #{image_number}]"),
+                    |name| format!("[Image #{image_number}: {name}]"),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {

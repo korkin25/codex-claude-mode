@@ -43,6 +43,38 @@ fn parses_agent_metadata_and_history() {
 }
 
 #[test]
+fn history_renders_remote_and_local_image_user_messages() {
+    let value = json!({
+        "id": "main",
+        "parentThreadId": null,
+        "status": {"type": "idle"},
+        "turns": [{"items": [
+            {"type": "userMessage", "content": [
+                {"type": "text", "text": "before"},
+                {"type": "localImage", "path": "/private/tmp/screenshot.png"},
+                {"type": "image", "url": "data:image/png;base64,secret"}
+            ]},
+            {"type": "userMessage", "content": [
+                {"type": "localImage", "path": "/tmp/only.jpg"}
+            ]}
+        ]}]
+    });
+
+    let thread = AgentThread::from_json(&value).expect("valid thread");
+
+    assert_eq!(
+        log(&thread),
+        vec![
+            (
+                LogKind::User,
+                "before\n[Image #1: screenshot.png]\n[Image #2]"
+            ),
+            (LogKind::User, "[Image #1: only.jpg]")
+        ]
+    );
+}
+
+#[test]
 fn streaming_item_is_replaced_by_completed_item() {
     let value = json!({
         "id": "agent",

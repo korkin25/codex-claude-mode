@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.9 — 2026-08-12
+
+- Fixed multiline terminal paste so pasted line breaks are collapsed into one
+  composer placeholder and submitted as one message.
+- Added clipboard image attachments with `Alt-I` on Linux and macOS, compact
+  composer placeholders and native Codex `localImage` turn input.
+- Added `$skill` discovery and completion with exact selected skill forwarding,
+  including correct handling of duplicate skill names.
+- Preserved image attachments in resumed session history and bracketed-paste
+  behavior when returning from a terminal editor.
+- Hardened clipboard capture with bounded background workers, private temporary
+  storage, stale cleanup and process cancellation on exit.
+
 ## 0.4.8 — 2026-08-12
 
 - Added direct sub-agent navigation with isolated logs, explicit session

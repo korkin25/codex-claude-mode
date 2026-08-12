@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -17,6 +19,9 @@ use super::Mode;
 use super::PermissionChoice;
 use super::SELECTED_BACKGROUND;
 use super::SURFACE_BACKGROUND;
+use super::SkillBinding;
+use super::SkillChoice;
+use super::SubmissionInput;
 use super::Workspace;
 use super::composer_viewport;
 use super::wrap_composer_input;
@@ -338,6 +343,219 @@ fn slash_input_opens_filterable_command_menu_and_inserts_selection() {
         Action::None
     ));
     assert_eq!(workspace.input, "/permissions ");
+}
+
+#[test]
+fn dollar_input_opens_skill_menu_and_inserts_selection() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![SkillChoice {
+        name: "release-notes".to_string(),
+        description: "Draft release notes".to_string(),
+        path: PathBuf::from("/skills/release-notes/SKILL.md"),
+    }]);
+
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render skills");
+    let contents = buffer_text(terminal.backend().buffer());
+    assert!(contents.contains("Skills"));
+    assert!(contents.contains("$release-notes"));
+    assert!(contents.contains("Draft release notes"));
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        Action::None
+    ));
+    assert_eq!(workspace.input, "$release-notes ");
+}
+
+#[test]
+fn submission_attaches_only_the_exact_selected_duplicate_skill() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![
+        SkillChoice {
+            name: "review".to_string(),
+            description: "First".to_string(),
+            path: PathBuf::from("/skills/first/SKILL.md"),
+        },
+        SkillChoice {
+            name: "review".to_string(),
+            description: "Second".to_string(),
+            path: PathBuf::from("/skills/second/SKILL.md"),
+        },
+    ]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let displayed = workspace.input.clone();
+    let submission = workspace.build_submission(displayed);
+
+    assert_eq!(
+        submission.input,
+        vec![
+            SubmissionInput::Text("$review ".to_string()),
+            SubmissionInput::Skill {
+                name: "review".to_string(),
+                path: PathBuf::from("/skills/second/SKILL.md"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn async_image_attachment_closes_and_recomputes_skill_popup_safely() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![SkillChoice {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    workspace.attach_image(PathBuf::from("/tmp/image.png"), "PNG", 10);
+
+    assert!(workspace.skill_popup.is_none());
+    assert!(workspace.input.ends_with("[Image #1 PNG 10 B]"));
+}
+
+#[test]
+fn image_inserted_before_selected_skill_shifts_its_exact_binding() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![SkillChoice {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    workspace.attach_image(PathBuf::from("/tmp/image.png"), "PNG", 10);
+    let displayed = workspace.input.clone();
+
+    let submission = workspace.build_submission(displayed);
+
+    assert!(submission.input.contains(&SubmissionInput::Skill {
+        name: "review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }));
+}
+
+#[test]
+fn editing_selected_skill_mention_invalidates_its_binding() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![SkillChoice {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    let displayed = workspace.input.clone();
+
+    let submission = workspace.build_submission(displayed);
+
+    assert!(
+        !submission
+            .input
+            .iter()
+            .any(|input| matches!(input, SubmissionInput::Skill { .. }))
+    );
+}
+
+#[test]
+fn history_resubmits_exact_duplicate_skill_binding() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![
+        SkillChoice {
+            name: "review".to_string(),
+            description: "First".to_string(),
+            path: PathBuf::from("/skills/first/SKILL.md"),
+        },
+        SkillChoice {
+            name: "review".to_string(),
+            description: "Second".to_string(),
+            path: PathBuf::from("/skills/second/SKILL.md"),
+        },
+    ]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    workspace.mode = Mode::Editing;
+
+    workspace.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Action::Submit(submission) if submission.input.contains(&SubmissionInput::Skill {
+            name: "review".to_string(),
+            path: PathBuf::from("/skills/second/SKILL.md"),
+        })
+    ));
+}
+
+#[test]
+fn shell_completion_before_skill_binding_shifts_exact_range() {
+    let directory = std::env::temp_dir().join(format!("ccm-skill-complete-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("unique-file"), "").unwrap();
+    let mut workspace = Workspace::new();
+    workspace.completion_cwd = directory.clone();
+    workspace.set_skills(vec![SkillChoice {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    workspace.handle_paste("cat un ".to_string());
+    workspace.input_cursor = Some("cat un".len());
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let displayed = workspace.input.clone();
+
+    let submission = workspace.build_submission(displayed);
+
+    assert!(submission.input.contains(&SubmissionInput::Skill {
+        name: "review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn whole_input_replacements_clear_stale_skill_bindings() {
+    let mut workspace = Workspace::new();
+    workspace.set_skills(vec![SkillChoice {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    }]);
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    workspace.input = "/per".to_string();
+    workspace.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(workspace.skill_bindings.is_empty());
+
+    workspace.skill_bindings.push(SkillBinding {
+        start: 0,
+        end: 7,
+        name: "review".to_string(),
+        path: PathBuf::from("/skills/review/SKILL.md"),
+    });
+    workspace.root_id = Some("main".to_string());
+    workspace.order.push("main".to_string());
+    let _ = workspace.prepare_subagent_request();
+    assert!(workspace.skill_bindings.is_empty());
 }
 
 #[test]
@@ -701,6 +919,37 @@ fn multiline_paste_renders_as_a_single_placeholder() {
     assert!(contents.contains("[Pasted text #1 +2 lines]"));
     assert!(!contents.contains("one"));
     assert!(!contents.contains("two"));
+}
+
+#[test]
+fn alt_i_requests_an_image_paste_without_inserting_text() {
+    let mut workspace = Workspace::new();
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT)),
+        Action::PasteImage
+    ));
+    assert!(workspace.input.is_empty());
+}
+
+#[test]
+fn pasted_image_renders_as_a_chip_and_submits_as_local_image() {
+    let mut workspace = Workspace::new();
+    workspace.input = "before ".to_string();
+    workspace.attach_image(PathBuf::from("/tmp/clipboard.png"), "PNG", 1536);
+    workspace.input.push_str(" after");
+
+    assert_eq!(workspace.input, "before [Image #1 PNG 1.5 KB] after");
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Action::Submit(submission)
+            if submission.displayed_text == "before [Image #1 PNG 1.5 KB] after"
+                && submission.input == vec![
+                    SubmissionInput::Text("before ".to_string()),
+                    SubmissionInput::LocalImage(PathBuf::from("/tmp/clipboard.png")),
+                    SubmissionInput::Text(" after".to_string()),
+                ]
+    ));
 }
 
 #[test]
