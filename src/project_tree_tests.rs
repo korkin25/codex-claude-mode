@@ -58,12 +58,13 @@ fn editor_action_uses_selected_file() {
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("a.rs"), "let value = 1;\n").unwrap();
     let mut browser = ProjectBrowser::open(root.clone());
+    let selected_file = root.join("a.rs").canonicalize().unwrap();
     browser.handle_key(key(KeyCode::Down));
     assert_eq!(
         browser.handle_key(key(KeyCode::Char('v'))),
         BrowserAction::OpenEditor {
             editor: EditorKind::VsCode,
-            path: root.join("a.rs")
+            path: selected_file
         }
     );
     fs::remove_dir_all(root).unwrap();
