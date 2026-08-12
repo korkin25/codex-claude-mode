@@ -1,38 +1,51 @@
 # Architecture
 
-`codex-claude-mode` is an independent frontend and, later, a remote control
-plane for installed Codex versions. Its compatibility boundary is the public
-Codex `app-server` JSON-RPC protocol. It must not link to Codex internal Rust
-crates or modify the installed Codex executable.
+`codex-claude-mode` is currently an independent local frontend for installed
+Codex versions. Its implemented compatibility boundary is the public Codex
+`app-server` JSON-RPC protocol. It must not link to Codex internal Rust crates
+or modify the installed Codex executable.
+
+The accepted multi-provider direction keeps `agent-orchestrator` as the single
+authoritative writer for Task/Run state, dependencies, journal, policy and
+recovery. `codex-claude-mode` remains an operator client with ephemeral UI
+state. The first integration slice is a read-only, versioned JSONL stdio bridge;
+it is planned, not implemented. See [ROADMAP.md](ROADMAP.md) for gates and
+[MULTI_AGENT_SPEC.md](MULTI_AGENT_SPEC.md) for requirements.
 
 ## Components
 
 ```text
-terminal/web client
-        |
-        | OAuth/OIDC user session
-        v
-cloud control plane and event relay
-        ^
-        | outbound mTLS/WebSocket, host identity
-        |
-host-agent ── local policy engine ── installed codex app-server
-                                      local CODEX_HOME
+codex-claude-mode TUI (implemented direct mode)
+        │
+        └── installed Codex app-server + local CODEX_HOME
+
+planned read-only first slice:
+
+codex-claude-mode TUI ── versioned JSONL stdio ── agent-orchestrator
+                                                    │
+                                             provider adapters
 ```
 
-- The client renders session and agent trees, logs, metrics, approvals, and a
-  composer. The current terminal client can also connect directly to a local
-  `app-server` child without any cloud component.
-- The cloud control plane authenticates users, authorizes access to registered
-  hosts, schedules typed jobs, and relays bounded event streams. It never sends
-  arbitrary shell commands to the host-agent.
-- The host-agent keeps an outbound connection to the cloud, validates every
-  requested job against local policy, and supervises one or more installed
-  `codex app-server` processes.
+- The implemented client renders session and agent trees, logs, metrics,
+  approvals and a composer while connected directly to a local app-server.
+- The planned read-only bridge observes authoritative orchestrator projections
+  without moving launch, cancel or approval actions off the existing direct
+  path. Live capabilities move individually only after their roadmap gates.
+- A future provider adapter/sidecar may supervise installed provider processes;
+  this responsibility does not belong to the TUI once that migration occurs.
 - Codex authentication remains local to the host and its `CODEX_HOME`. OpenAI
   access tokens are never uploaded to or reused by the cloud service.
 
-## Identity and authorization
+No second broker, scheduler or authoritative database is added to the Rust
+client.
+
+## Future remote identity and authorization
+
+This section is a non-MVP design candidate, not an implemented topology or an
+accepted deployment commitment. The first remote experiment, if approved by a
+separate ADR, is SSH stdio using the same local envelopes and replay cursor.
+OAuth/OIDC, a cloud relay and mTLS/WebSocket remain later options and must not
+be inferred from the local architecture.
 
 User identity and Codex provider identity are different security domains.
 Users should sign in to the cloud service through OAuth 2.1/OIDC (for example,
@@ -60,7 +73,10 @@ The host-agent exposes typed operations such as `session.start`, `turn.send`,
 execution, filesystem access, environment mutation, or arbitrary Codex CLI
 arguments to the cloud.
 
-## Session and data safety
+## Future remote session and data safety
+
+The following are requirements for any future remote implementation; they do
+not claim that a cloud control plane or host-agent exists today.
 
 - Hosts make outbound connections; no inbound host port is required.
 - A Codex child receives an explicit cwd, `CODEX_HOME`, environment allowlist,
@@ -86,7 +102,7 @@ suite against every supported installed Codex version. Unknown response fields
 are ignored; missing required fields fail closed with a useful compatibility
 report.
 
-The first supported transport is local stdio. Unix sockets are the next local
-transport; the host-agent/cloud protocol is separate and must not tunnel raw
-JSON-RPC without authorization and filtering.
-
+The implemented direct transport is the Codex app-server child connection. The
+first planned orchestrator transport is read-only JSONL stdio; Unix sockets may
+follow only after shared fixtures pass. Any future host-agent/cloud protocol is
+separate and must not tunnel raw JSON-RPC without authorization and filtering.

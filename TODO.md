@@ -1,75 +1,384 @@
-# TODO
+# Atomic task registry
 
-## Local standalone product
+Единственный источник статуса атомарных roadmap-задач. Порядок фаз и gates — в
+[ROADMAP.md](ROADMAP.md), требования — в
+[MULTI_AGENT_SPEC.md](MULTI_AGENT_SPEC.md). Stable ID не переиспользуются и не
+перенумеровываются.
 
-### [x] 1. Create the independent project
+Статусы: `done`, `ready`, `planned`, `blocked`, `deferred`. `done` требует
+ссылки на проверяемое evidence; наличие кода в dirty worktree не является
+evidence релиза.
 
-Move the standalone frontend to `codex-claude-mode`, remove internal Codex
-crate dependencies, launch an installed `codex app-server`, and keep the fixed
-test home at `/home/kk573/tmp/codex-agent-picker-test-home`.
+## P0 — Baseline freeze
 
-### [x] 2. Implement the first local workspace slice
+### CCM-BASE-001 — Extract the standalone frontend
 
-Render Main and nested sub-agents in a horizontal selector, independently
-selected borderless logs, status/time/token metrics, keyboard and mouse
-navigation, a three-row composer with input history, live assistant output, and
-parent-routed sub-agent messages. Discover persisted descendants through the
-app-server ancestor filter. Add a non-interactive backend compatibility probe.
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: `P0`
+- Depends on: none
+- Outcome: независимый frontend запускает установленный Codex app-server без
+  внутренних Codex crates.
+- Acceptance: отдельная сборка и явные `--codex`, `--codex-home`, `--cwd`.
+- Evidence: commits `b0bb1b1`…`4f8fedf`; shipped baseline описан в README.
+- Size: `L` (historical)
 
-### [ ] 3. Complete local app-server behavior
+### CCM-BASE-002 — Deliver the first local workspace slice
 
-- [x] Implement fail-closed typed command/file/permission approvals, user-input
-  and MCP elicitation UI, plus active-turn interrupts.
-- [ ] Add reconnect/resume, durable local event journals, paginated history,
-  multiline composer editing, correct wrapped-line scrolling, and explicit
-  selection among multiple roots.
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: `P0`
+- Depends on: `CCM-BASE-001`
+- Outcome: Main/sub-agent UI, независимые логи, composer, prompts и approvals.
+- Acceptance: выбранный thread управляется без смешивания логов; unknown
+  approvals fail closed.
+- Evidence: commits до `4f8fedf`; существующие Rust tests.
+- Size: `L` (historical)
 
-Never silently accept an approval.
+### CCM-BASE-003 — Inventory and verify the dirty 0.4.7 candidate
 
-### [ ] 4. Add the compatibility contract
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: `P0`
+- Depends on: `CCM-BASE-002`
+- Outcome: таблица `shipped | tested | unverified | planned` для накопленных
+  direct-Codex UX изменений.
+- Acceptance: версия не объявлена готовой; каждый пункт сопоставлен с test,
+  commit/release evidence либо отдельной задачей.
+- Evidence: [BASELINE_INVENTORY.md](BASELINE_INVENTORY.md); packaged Linux
+  `0.4.7` hashes and timestamp recorded separately from the post-package dirty
+  tree; 72 baseline tests pass. `G0` remains open because macOS evidence is not
+  yet available.
+  commit/tag or macOS evidence exists.
+- Size: `S`
 
-Probe methods/fields at runtime, emit a compatibility report, add fixture tests
-for supported schemas, and run end-to-end tests against a matrix of installed
-Codex binaries. Package the frontend without bundling Codex.
+### CCM-BASE-004 — Commit a verified direct-mode baseline
 
-## Remote access
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: `P0`
+- Depends on: `CCM-BASE-003`
+- Outcome: накопленные изменения разделены на атомарные проверенные коммиты, а
+  рабочее дерево возвращено в чистое baseline-состояние.
+- Acceptance: application и documentation changes зафиксированы отдельно;
+  каждый application commit компилируется и проходит релевантные tests;
+  финальный baseline проходит Rust 1.95 fmt, tests и Clippy; `dist` не попадает
+  в Git; релиз `0.4.8` не создаётся в рамках этой задачи.
+- Evidence: application commit `4234d55`; Rust 1.95.0 `cargo fmt --check`, 72
+  tests and `cargo clippy --all-targets -- -D warnings` pass on Linux;
+  `git diff --check` passes. Documentation is committed separately.
+- Size: `M`
 
-### [ ] 5. Build the host-agent supervisor
+### CCM-DIRECT-001 — Split and verify direct-Codex compatibility backlog
 
-Add workspace-root and profile configuration, safe path resolution, Codex child
-lifecycle management, bounded event journals, resource/concurrency limits, and
-an outbound-only control connection. Keep Codex credentials local.
+- Repo owner: `CCM`
+- Status: `planned`
+- Phase: `P0`
+- Depends on: `CCM-BASE-003`
+- Outcome: отдельные задачи на reconnect/resume, paginated history, multi-root
+  selection и runtime schema probing.
+- Acceptance: каждая capability имеет собственный test/evidence; unknown
+  events и approvals fail closed; CLI output не парсится вместо app-server.
+- Evidence: pending.
+- Size: `M`
 
-### [ ] 6. Define the typed remote protocol
+### SHARED-PLATFORM-001 — Establish the Linux/macOS baseline matrix
 
-Version commands and events for host enrollment, capabilities, session start,
-turn input/interrupt, approvals, agent trees, logs, metrics, reconnect cursors,
-and heartbeats. Add idempotency, expiry, replay protection, backpressure, and
-hard payload limits. Do not expose arbitrary shell or raw app-server RPC.
+- Repo owner: `SHARED`
+- Status: `ready`
+- Phase: `P0`
+- Depends on: `CCM-BASE-002`
+- Outcome: обязательная OS/architecture/capability/test/release matrix.
+- Acceptance: gaps явно `unsupported/degraded`; product/tests не используют
+  Linux-only shell/GNU assumptions; CI plan покрывает обе OS.
+- Evidence: pending.
+- Size: `M`
 
-### [ ] 7. Implement separate user and host identity
+## P1 — Shared protocol contract
 
-Use OAuth 2.1/OIDC for users. Use one-time device enrollment followed by
-short-lived mTLS workload credentials for hosts. Add tenant/project RBAC,
-credential rotation and revocation, and auditable authorization decisions.
-Do not reuse Codex/OpenAI credentials as service identity.
+### SHARED-PROTO-001 — Specify bounded versioned envelopes
 
-### [ ] 8. Implement a minimal control plane
+- Repo owner: `SHARED`
+- Status: `planned`
+- Phase: `P1`
+- Depends on: `CCM-BASE-003`
+- Outcome: JSONL command/event/snapshot schema с sequence, replay cursor,
+  correlation/causation, idempotency и expected revision.
+- Acceptance: bounds и compatibility/fail-closed rules нормативны и не содержат
+  provider-specific IDs как canonical identity.
+- Evidence: pending shared schema/ADR.
+- Size: `M`
 
-Add tenant-isolated persistence, host presence, job dispatch, encrypted event
-relay, reconnect cursors, retention controls, rate limits, and audit logs. Begin
-with a single-tenant deployment while keeping tenant IDs mandatory in storage
-and authorization boundaries.
+### SHARED-PROTO-002 — Add cross-language golden fixtures
 
-### [ ] 9. Add remote clients
+- Repo owner: `SHARED`
+- Status: `planned`
+- Phase: `P1`
+- Depends on: `SHARED-PROTO-001`
+- Outcome: одинаковые fixtures lifecycle, gap, duplicate/conflict, reconnect,
+  approval и unknown version/type для Python и Rust.
+- Acceptance: обе реализации дают одинаковые projections/errors.
+- Evidence: pending tests in both repositories.
+- Size: `M`
 
-Connect the terminal UI through the control plane, then add an optional web UI.
-Preserve the same tree/log/composer semantics locally and remotely. Clearly
-show host, workspace, profile, sandbox, approval mode, and connection state.
+## P2 — Read-only bridge
 
-### [ ] 10. Security validation before multi-user release
+### AOR-BRIDGE-001 — Expose read-only stdio snapshot/replay
 
-Threat-model tenant escape, confused deputy behavior, symlink/path traversal,
-credential theft, replay, event injection, stale approvals, log leakage, denial
-of service, and unsafe upgrades. Add adversarial tests, external review,
-incident controls, backup/restore tests, and documented key rotation.
+- Repo owner: `AOR`
+- Status: `planned`
+- Phase: `P2`
+- Depends on: `SHARED-PROTO-002`
+- Outcome: `serve --stdio` над authoritative AOR projections.
+- Acceptance: snapshot+ordered replay, bounded backpressure, explicit protocol
+  errors; отсутствуют mutating commands.
+- Evidence: pending AOR integration tests.
+- Size: `M`
+
+### CCM-BRIDGE-001 — Render neutral read-only projections
+
+- Repo owner: `CCM`
+- Status: `planned`
+- Phase: `P2`
+- Depends on: `SHARED-PROTO-002`, `AOR-BRIDGE-001`
+- Outcome: provider-neutral Agent/Task/Run/Approval/Artifact views и reconnect.
+- Acceptance: direct-Codex режим сохранён; draft/scroll/unread не теряются;
+  disconnected/stalled/degraded показаны честно.
+- Evidence: pending integration and snapshot tests.
+- Size: `L`
+
+## P3 — Codex shadow
+
+### SHARED-SHADOW-001 — Compare Codex and AOR projections
+
+- Repo owner: `SHARED`
+- Status: `planned`
+- Phase: `P3`
+- Depends on: `CCM-BRIDGE-001`
+- Outcome: direct Codex events поступают в shadow normalization без управления
+  действиями.
+- Acceptance: replay/dedupe/crash scenarios совпадают; payload bounded.
+- Evidence: pending cross-repo integration tests.
+- Size: `L`
+
+## P4 — Live Codex slices
+
+### AOR-CODEX-001 — Enable Observe as the first live capability
+
+- Repo owner: `AOR`
+- Status: `blocked`
+- Phase: `P4`
+- Depends on: `SHARED-SHADOW-001`, explicit owner approval for AOR public API
+- Outcome: только `Observe` проходит authoritative path.
+- Acceptance: leases/reconciliation/exactly-one terminal outcome; rollback to
+  direct-Codex documented.
+- Evidence: pending.
+- Size: `M`
+
+### AOR-CODEX-002 — Move Codex process capabilities incrementally
+
+- Repo owner: `AOR`
+- Status: `planned`
+- Phase: `P4`
+- Depends on: `AOR-CODEX-001`
+- Outcome: process ownership, launch, cancel и approval включаются отдельными
+  audited slices.
+- Acceptance: fixture и rollback для каждой capability; effective permissions
+  have evidence.
+- Evidence: pending.
+- Size: `XL`
+
+## P5 — Second provider
+
+### AOR-ADAPTER-CLAUDE-001 — Add the Claude provider adapter
+
+- Repo owner: `AOR`
+- Status: `planned`
+- Phase: `P5`
+- Depends on: `AOR-CODEX-002`
+- Outcome: Claude session/run lifecycle через общий adapter contract.
+- Acceptance: capability negotiation, cancel/recovery and requested/effective
+  permission evidence work on Linux/macOS.
+- Evidence: pending adapter contract tests.
+- Size: `L`
+
+### CCM-ADAPTER-CLAUDE-001 — Present Claude in the common operator UX
+
+- Repo owner: `CCM`
+- Status: `planned`
+- Phase: `P5`
+- Depends on: `AOR-ADAPTER-CLAUDE-001`
+- Outcome: Codex и Claude одновременно видны и управляемы в одном workspace.
+- Acceptance: provider/model/status/capabilities/permissions различимы; fallback
+  не выдаётся за native capability.
+- Evidence: pending integration and snapshot tests.
+- Size: `M`
+
+## P6 — Compare and bus
+
+### AOR-COMPARE-001 — Implement bounded two-provider compare
+
+- Repo owner: `AOR`
+- Status: `planned`
+- Phase: `P6`
+- Depends on: `CCM-ADAPTER-CLAUDE-001`
+- Outcome: immutable digest-bound TaskSnapshot запускается на Codex и Claude.
+- Acceptance: independent latency/usage/cost/outcome/artifacts, partial results,
+  all/quorum/deadline, no automatic winner.
+- Evidence: pending integration tests.
+- Size: `L`
+
+### AOR-BUS-001 — Implement durable scoped agent messaging
+
+- Repo owner: `AOR`
+- Status: `planned`
+- Phase: `P6`
+- Depends on: `CCM-ADAPTER-CLAUDE-001`, `SHARED-PROTO-002`
+- Outcome: inbox/outbox, ack/redelivery, dependency wake-up и result routing.
+- Acceptance: idempotency, cycle/depth/fan-out/budget limits and immediate
+  unblock; provider credentials не передаются.
+- Evidence: pending deterministic and recovery tests.
+- Size: `XL`
+
+### SHARED-BUS-001 — Expose scoped MCP bus tools and skills
+
+- Repo owner: `SHARED`
+- Status: `planned`
+- Phase: `P6`
+- Depends on: `AOR-BUS-001`
+- Outcome: create/send/query/wait/cancel/collect доступны разным agents через
+  vendor-specific configuration одного контракта.
+- Acceptance: short-lived scoped identity, bounded context and schema-validated
+  results; repeated idempotency key не создаёт работу повторно.
+- Evidence: pending cross-provider fixtures.
+- Size: `L`
+
+## P7 — Optional integrations
+
+### CCM-IDE-001 — Add a thin VS Code/Cursor operator client
+
+- Repo owner: `CCM`
+- Status: `deferred`
+- Phase: `P7`
+- Depends on: `AOR-BUS-001`
+- Outcome: Agents/Tasks/Attention/Artifacts используют native Explorer, Search,
+  SCM, diff, editor, terminal и workspace APIs.
+- Acceptance: typed capability-gated IPC; no arbitrary IDE command/shell; TUI
+  minimal viewer remains fallback.
+- Evidence: pending.
+- Size: `XL`
+
+### SHARED-OBS-001 — Export bounded redacted OTLP telemetry
+
+- Repo owner: `SHARED`
+- Status: `deferred`
+- Phase: `P7`
+- Depends on: `AOR-COMPARE-001`, `AOR-BUS-001`
+- Outcome: correlated tasks/runs/provider/tools with token/cost provenance.
+- Acceptance: cardinality/privacy bounds; unknown values remain unknown; no
+  prompts/code/secrets/raw IDs by default.
+- Evidence: pending.
+- Size: `L`
+
+### AOR-RAG-001 — Provide shared code-intelligence retrieval
+
+- Repo owner: `AOR`
+- Status: `deferred`
+- Phase: `P7`
+- Depends on: `AOR-BUS-001`
+- Outcome: bounded lexical/LSP/SCIP/tree-sitter retrieval with optional existing
+  embedding storage, exposed through MCP.
+- Acceptance: SHA/worktree/index-generation freshness, ACL/redaction, exact
+  citations and explicit degraded fallback; no custom vector DB.
+- Evidence: pending.
+- Size: `XL`
+
+### AOR-CHAT-001 — Add Telegram and Slack sidecars
+
+- Repo owner: `AOR`
+- Status: `deferred`
+- Phase: `P7`
+- Depends on: `AOR-BUS-001`, authoritative approval lifecycle
+- Outcome: opt-in notification/status/result first; approved typed actions later.
+- Acceptance: pairing/RBAC, digest/revision/expiry, replay protection, redaction,
+  durable retry and mock API tests; chat is not source of truth.
+- Evidence: pending.
+- Size: `XL`
+
+### AOR-MCP-001 — Add the MCP-first SaaS connector registry
+
+- Repo owner: `AOR`
+- Status: `deferred`
+- Phase: `P7`
+- Depends on: `AOR-BUS-001`
+- Outcome: allowlisted versioned profiles for Jira, Confluence and similar SaaS.
+- Acceptance: scoped secret refs, read/mutation separation, exact approval,
+  freshness/tenant bounds and malicious-content tests; no bespoke core clients.
+- Evidence: pending.
+- Size: `XL`
+
+## P8 — Remote access
+
+### SHARED-REMOTE-001 — Decide remote trust boundary in an ADR
+
+- Repo owner: `SHARED`
+- Status: `deferred`
+- Phase: `P8`
+- Depends on: `AOR-BUS-001`
+- Outcome: accepted identity/RBAC/approval/revocation/retention/path/threat model.
+- Acceptance: SSH stdio evaluated first; HTTPS/WSS/listeners explicitly gated.
+- Evidence: pending ADR and security review.
+- Size: `M`
+
+### SHARED-REMOTE-002 — Prototype SSH stdio
+
+- Repo owner: `SHARED`
+- Status: `deferred`
+- Phase: `P8`
+- Depends on: `SHARED-REMOTE-001`
+- Outcome: local envelopes/replay work unchanged over authenticated SSH stdio.
+- Acceptance: Linux/macOS client-host matrix, bounded reconnect/backpressure and
+  safe remote URI/path handling.
+- Evidence: pending integration tests.
+- Size: `L`
+
+## Deferred ideas requiring decomposition
+
+До перевода в `planned` этим темам нужны отдельные owner, dependency и bounded
+acceptance: Gemini/Grok adapters; structured `@` autocomplete and collectors;
+provider-neutral external isolation; intelligent script/impact advisor; project
+and worktree forest; bulk session administration; token recommender; optional
+AG-UI/A2A federation beyond the scoped bus edge.
+
+## Legacy mapping
+
+Старые номера сохранены только для истории и не являются task identity.
+
+| Legacy TODO | Stable replacement |
+|---|---|
+| 1 | `CCM-BASE-001` |
+| 2 | `CCM-BASE-002` |
+| 3 | `CCM-BASE-003`, `CCM-DIRECT-001` |
+| 4 | `SHARED-PROTO-001`, `SHARED-PROTO-002` |
+| 5 | `AOR-BRIDGE-001` |
+| 6 | `CCM-BRIDGE-001` |
+| 7 | `SHARED-SHADOW-001` |
+| 8 | `AOR-CODEX-001` |
+| 9 | `AOR-CODEX-002`, `AOR-ADAPTER-CLAUDE-001`, `CCM-ADAPTER-CLAUDE-001` |
+| 10 | `AOR-COMPARE-001` |
+| 11 | `AOR-BUS-001`, `SHARED-BUS-001` |
+| 12 | `CCM-IDE-001`, `SHARED-OBS-001`, `AOR-RAG-001` |
+| 13 | `SHARED-REMOTE-001`, `SHARED-REMOTE-002` |
+| 14 | `SHARED-PLATFORM-001` plus every phase gate |
+| 15 | `AOR-CHAT-001` |
+| 16 | `AOR-MCP-001` |
+
+## Explicit non-goals
+
+- No second broker or authoritative DB in Rust.
+- No custom workflow/graph DSL, vector DB, trace backend or discovery protocol.
+- No full IDE Explorer/editor/SCM/diff in TUI; its minimal viewer is a fallback.
+- No vendor-to-vendor direct messaging, implicit credential sharing, silent
+  permission downgrade/escalation, automatic routing or winner selection.
+- No bespoke Jira/Confluence/GitHub/GitLab/Linear/Notion core clients; use
+  reviewed MCP servers behind the registry.
