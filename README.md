@@ -1,26 +1,49 @@
 # codex-claude-mode
 
-Standalone terminal frontend for the public Codex `app-server` protocol. It
-uses an already installed Codex as its backend and does not replace or patch
-that installation.
+**A focused terminal workspace for running Codex with multiple agents.**
 
-This is experimental community software. It is not affiliated with, endorsed
-by or supported by OpenAI, Anthropic, Google, xAI, Microsoft or Anysphere.
+`codex-claude-mode` is a standalone TUI for the public Codex `app-server`
+protocol. It gives developers one place to start or resume a Codex session,
+switch between Main and sub-agents, follow each agent's work, review approvals,
+and browse the project without losing context.
 
-Prerequisites:
+It uses your existing Codex installation, authentication, configuration, and
+session files. It does not replace or patch the Codex CLI.
 
-- an installed `codex` CLI available on `PATH` and authenticated for normal
-  Codex use (`codex --version` must succeed);
-- a supported terminal on Linux x86_64 or macOS Apple Silicon;
-- Rust 1.95 only when building from source.
+## What it does
 
-## Install a release binary
+- Keeps Main and sub-agent conversations in separate, directly selectable logs.
+- Shows live reasoning status, tool activity, commands, file changes, token use,
+  elapsed time, and agent state.
+- Lets you create, resume, rename, fork, archive, delete, review, and compact
+  sessions from the terminal.
+- Handles command, permission, file-change, user-input, and MCP approval prompts;
+  file changes can be reviewed in a full patch viewer before approval.
+- Includes slash-command and permission-profile pickers, input history,
+  multiline paste handling, and shell/path completion.
+- Includes a project tree, syntax-highlighted file viewer, and shortcuts to open
+  files in Vim, VS Code, or Cursor.
 
-Release assets are published for Linux x86_64 and macOS ARM64. Intel macOS has
-no binary artifact and remains unverified. Install into the user-writable
-`~/.local/bin`; `sudo` is neither required nor recommended.
+It is aimed at developers who already use Codex and want a keyboard-first view
+of multi-agent work, especially when several agents are active at once.
 
-Linux x86_64:
+> **Experimental community software.** This project depends on the experimental
+> Codex `app-server` protocol and may need updates when that protocol changes. It
+> is not affiliated with, endorsed by, or supported by OpenAI, Anthropic,
+> Google, xAI, Microsoft, or Anysphere.
+
+## Quick start
+
+You need an installed and authenticated `codex` CLI. Confirm that it works:
+
+```bash
+codex --version
+```
+
+Release binaries are available for Linux x86_64 and macOS Apple Silicon. They
+install into `~/.local/bin`; `sudo` is not required.
+
+### Linux x86_64
 
 ```bash
 version="0.4.8"
@@ -33,12 +56,12 @@ tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
 mkdir -p "$HOME/.local/bin"
 cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
 chmod 755 "$HOME/.local/bin/codex-claude-mode"
-codex --version
 "$HOME/.local/bin/codex-claude-mode" --version
 "$HOME/.local/bin/codex-claude-mode" --check-backend
+"$HOME/.local/bin/codex-claude-mode"
 ```
 
-macOS Apple Silicon:
+### macOS Apple Silicon
 
 ```bash
 version="0.4.8"
@@ -51,139 +74,137 @@ tar -xzf "codex-claude-mode-${version}-${platform}.tar.gz"
 mkdir -p "$HOME/.local/bin"
 cp "codex-claude-mode-${version}-${platform}/codex-claude-mode" "$HOME/.local/bin/"
 chmod 755 "$HOME/.local/bin/codex-claude-mode"
-codex --version
 "$HOME/.local/bin/codex-claude-mode" --version
 "$HOME/.local/bin/codex-claude-mode" --check-backend
+"$HOME/.local/bin/codex-claude-mode"
 ```
 
-Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` if the directory is not
-already on `PATH`. The initial macOS archive is unsigned and not notarized. If
-Gatekeeper quarantines this verified download, remove quarantine narrowly from
-the installed binary—never recursively from a directory:
+If `~/.local/bin` is not on your `PATH`, add this to `~/.zshrc` (macOS) or
+your shell's equivalent startup file:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The macOS archive is currently unsigned and not notarized. After verifying its
+checksum, if Gatekeeper quarantines the binary, remove quarantine from that
+binary only:
 
 ```bash
 xattr -d com.apple.quarantine "$HOME/.local/bin/codex-claude-mode"
 ```
 
-To update, repeat the verified download for the new version and replace that
-single binary. To uninstall:
+## Using the workspace
+
+At startup, choose **New session** or explicitly resume a saved root session for
+the current directory. `Ctrl-A` selects Main and prepares a request for a new
+sub-agent; use the agent bar to move between its separate conversations.
+
+Type `/` to browse supported client commands, including `/new`, `/resume`,
+`/permissions`, `/agent`, `/subagents`, `/review`, `/diff`, and `/skills`.
+
+Run `codex-claude-mode --help` for wrapper options and the selected Codex
+backend's original options. Useful wrapper options include `--codex`,
+`--codex-home`, `--cwd`, `--thread`, and `--check-backend`.
+
+## Keyboard shortcuts
+
+Shortcuts are mode-specific. In particular, arrow keys move the text cursor in
+**Editing** and switch agents only in **Navigation**.
+
+### Navigation and logs
+
+| Mode | Keys | Action |
+| --- | --- | --- |
+| Any workspace mode | `Ctrl-A` / `Ctrl-N` / `Ctrl-R` | Prepare a sub-agent request / start a clean session / open the session picker |
+| Any workspace mode | `Ctrl-C` | Interrupt the selected active turn |
+| Any workspace mode | `Ctrl-D` twice / `Ctrl-Q` | Confirmed quit / immediate quit |
+| Navigation | `Left` or `Up` / `Right` or `Down` | Select the previous / next agent |
+| Navigation | `PageUp` / `PageDown`, `Home` / `End` | Scroll the selected log / jump to its start or end |
+| Navigation | `Enter` | Enter Editing mode |
+| Navigation | Any unmodified character | Enter Editing and keep the typed character |
+| Navigation | `i` | Open session and agent details |
+
+### Editing and composer
+
+| Mode | Keys | Action |
+| --- | --- | --- |
+| Editing | `Esc` | Enter Navigation mode |
+| Editing | `Left` / `Right`, `Home` / `End` | Move the text cursor / jump to input start or end |
+| Editing | `Up` / `Down` | Recall older / newer input |
+| Editing | `PageUp` / `PageDown` | Scroll the log without leaving the composer |
+| Editing | `Enter` | Submit non-empty input |
+| Editing | `Ctrl-U` | Clear the current input |
+| Editing | `Tab` | Complete a slash command, executable, or workspace path |
+| Completion menu | `Up` / `Down`, `Enter` or `Tab`, `Esc` | Select, apply, or close completion |
+
+### Approvals and permissions
+
+| Context | Keys | Action |
+| --- | --- | --- |
+| Approval or permission prompt | `Up` / `Down` or `k` / `j`, `Enter` | Select and confirm an offered decision |
+| Approval prompt | `y` / `a` / `n` / `x` | Approve once / approve for session / decline / cancel, when offered |
+| Permission prompt | `y` / `a` / `n` / `x` | Allow for turn / allow for session / deny for turn / deny and interrupt |
+| File-change approval | `Ctrl-A` | Open the full patch viewer |
+| Any active prompt | `PageUp` / `PageDown`, `Home` / `End` | Scroll the log behind the fixed prompt |
+| Any active prompt | `Ctrl-C` | Cancel the prompt and interrupt its turn |
+| Permission-profile picker | Arrows, `Enter`, `Esc` | Select, apply, or close the profile picker |
+
+### Project tree, file viewer, and diff
+
+| Context | Keys | Action |
+| --- | --- | --- |
+| Navigation | `t` | Open the selected agent's project tree |
+| Project tree | Arrows or `h` / `j` / `k` / `l`, `Enter` | Navigate, collapse, expand, or open |
+| Project tree | `g` / `G` | Jump to the first / last entry |
+| Project tree | `e` / `v` / `c` | Open the selected file in the terminal editor / VS Code / Cursor |
+| Project tree | `q`, `Esc`, or `t` | Close the tree |
+| File viewer | `Up` / `Down` or `k` / `j`, `PageUp` / `PageDown`, `g` / `G` | Scroll by line, page, or to the start/end |
+| File viewer | `Left` or `h`, `q`, or `Esc` | Return to the project tree |
+| File viewer | `e` / `v` / `c` | Open the file in the terminal editor / VS Code / Cursor |
+| Patch viewer | `Up` / `Down` or `k` / `j`, `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D`, `Home` / `End` | Scroll the diff |
+| Patch viewer | `q` or `Ctrl-C` | Return to the pending approval |
+| Editing | `/diff` | Request the current workspace diff from Codex |
+
+## Build from source
+
+Building requires Rust 1.95:
+
+```bash
+git clone https://github.com/korkin25/codex-claude-mode.git
+cd codex-claude-mode || exit
+git checkout v0.4.8
+cargo build --locked --release
+target/release/codex-claude-mode --check-backend
+target/release/codex-claude-mode
+```
+
+## Current limitations
+
+- Prebuilt binaries are limited to Linux x86_64 and macOS ARM64. Intel macOS is
+  unverified and has no release artifact.
+- The frontend and Codex run as separate local processes. Codex credentials stay
+  in `CODEX_HOME`; this project does not provide separate authentication.
+- Older saved parent-owned agents are read-only because direct replies could be
+  copied into Main. Create a new direct sub-agent instead.
+- Multi-provider orchestration, a durable agent bus, and remote integrations are
+  roadmap items, not features in v0.4.8.
+
+To update, repeat the verified release download with a newer version. To
+uninstall:
 
 ```bash
 rm "$HOME/.local/bin/codex-claude-mode"
 ```
 
-## Build from source
+## More information
 
-Install Rust 1.95, clone the repository and build the immutable release tag:
+- [Architecture and security boundaries](ARCHITECTURE.md)
+- [Multi-agent behavior specification](MULTI_AGENT_SPEC.md)
+- [Platform support and smoke checks](PLATFORM_SUPPORT.md)
+- [Roadmap](ROADMAP.md)
+- [Task status](TODO.md)
+- [Changelog](CHANGELOG.md)
+- [Security policy](SECURITY.md)
 
-```bash
-git clone https://github.com/korkin25/codex-claude-mode.git
-cd codex-claude-mode
-git checkout v0.4.8
-cargo build --release
-target/release/codex-claude-mode \
-  --codex "$HOME/.local/bin/codex" \
-  --codex-home "$HOME/.codex"
-```
-
-Wrapper options are `--codex`, `--codex-home`, `--cwd`, `--thread`, and
-`--check-backend`. Other command-line options are forwarded to the installed
-Codex before `app-server`; use `--` to force all remaining arguments through.
-`--help` prints both this wrapper's options and the selected Codex binary's
-original help.
-
-Run a non-interactive compatibility probe first:
-
-```bash
-target/release/codex-claude-mode \
-  --codex "$HOME/.local/bin/codex" \
-  --codex-home "$HOME/.codex" \
-  --check-backend
-```
-
-The upper, borderless pane shows the selected agent's log. A three-row message
-composer sits below it, followed by a horizontal Main/sub-agent bar and the
-selected agent's status, elapsed time, token usage, and full ID. `Esc` enters
-navigation mode; Left/Right select an agent, PageUp/PageDown/Home/End scroll its
-log, and Enter returns to the composer. Up/Down recall message history while
-editing. Starting to type in navigation mode enters the composer without
-dropping the first character. Mouse selection and wheel scrolling are also
-supported. In navigation mode, `i` opens session/agent details including the
-session, root, agent and parent IDs, working directory, status, and the exact
-rollout/log path reported by Codex; `i`, Esc, or Enter closes the panel. The
-wrapper starts Codex with legacy direct-input agents so chats
-remain in the selected sub-agent thread instead of being copied through Main.
-An older saved parent-owned agent is shown read-only: attempting to message it
-explains how to create a new direct agent rather than silently polluting Main.
-User messages use a distinct background and a live response timer that freezes
-when the first answer text arrives. Structured activity shows reasoning, web and file searches, commands,
-tool calls, file changes, and sub-agent actions as they happen. Agent replies
-are shown without an `Assistant:` wrapper. Agent markers are `●`
-working, `•` idle, `○` closed, and `!` error.
-
-Startup never silently resumes the newest conversation. It first shows `New
-session` plus the root sessions found for the current working directory;
-Up/Down and Enter create a clean Main or explicitly continue the selected
-session. `--thread <id>` bypasses the picker for intentional scripted resumes.
-Inside the workspace, `Ctrl-A` selects Main and prepares a natural-language
-request for a new sub-agent, `Ctrl-N` starts a clean session, and `Ctrl-R`
-reopens the saved-session picker.
-
-Slash input is handled as Codex client commands instead of being sent to the
-model as literal text. The standalone frontend currently implements `/new`,
-`/clear`, `/resume`, `/skills`, `/status`, `/permissions`, `/agent`, `/subagents`, `/compact`,
-`/rename`, `/fork`, `/archive`, `/delete`, `/review`, `/init`, and `/diff`.
-`/skills` lists enabled skills for the workspace; `$skill-name` mentions in a
-normal message are passed unchanged to Codex's native skill resolver.
-`/permissions` lists available profiles and `/permissions <id>` applies one to
-subsequent turns through the native `turn/start.permissions` field.
-Typing `/` opens a filtered command menu above the composer. Use Up/Down to
-select and Enter or Tab to insert a command. `/permissions` opens an allowed
-profile picker with Up/Down, Enter to apply, and Esc to cancel. `Ctrl-U` clears
-the current composer line without corrupting a draft saved behind an approval.
-Left/Right in the normal editing composer move the text cursor. Press `Esc` to
-enter navigation mode before using Left/Right to select the previous/next agent;
-the composer draft is preserved.
-Tab also completes executable names from `PATH` and filesystem paths relative
-to the workspace. Multiple matches open a selectable completion popup; no shell
-startup files or user-entered commands are executed while completing.
-Multiline terminal pastes are collapsed to `[Pasted text #N +K lines]` markers
-in the composer and expanded back to their original contents when submitted.
-PageUp/PageDown and the mouse wheel continue scrolling the log while editing.
-
-From navigation mode, `t` opens the selected agent's project tree. Use arrows
-or `h/j/k/l` to navigate, `g/G` for the first/last entry, and Enter or `l` to
-expand a directory or view a file. The built-in viewer shows line numbers and
-syntax highlighting. Press `e` for `$VISUAL`/`$EDITOR` (falling back to Vim),
-`v` for VS Code, or `c` for Cursor. `q`, Esc, or `t` closes the browser.
-
-Agent logs are prefetched once and switching uses the in-memory cache without a
-new `thread/read`. Agents stay ordered by creation time. When an older Codex
-backend requires a sub-agent message to travel through Main, the transport turn
-is hidden while the selected sub-agent's own answer appears in its log.
-
-Interactive command, file-change, and permission approvals are shown in the log
-pane with explicit allow/deny scope. File approvals include the paths and diff
-received in the matching `item/started` event; keyboard or mouse scrolling keeps
-long patches reviewable. If the backend supplies no change details, the prompt
-says so instead of presenting an opaque item ID as sufficient evidence. Codex
-user-input questions and MCP elicitations are handled there as well. Unknown or
-overlapping requests fail closed; the frontend never silently accepts an
-approval. Press `Ctrl-C` to interrupt the selected active turn. Press `Ctrl-D`
-once to leave editing and again to quit; any other key cancels the pending exit.
-`Ctrl-Q` remains the immediate quit shortcut.
-File-change approvals keep the question and decisions in a highlighted fixed
-panel. `Ctrl-A` opens the full patch in a separate `P A T C H` pager matching
-Codex navigation (arrows, j/k, PageUp/PageDown, Ctrl-U/Ctrl-D, Home/End); q or
-Ctrl-C returns to the still-pending approval. Reasoning/Thinking is shown only
-as the live header status, not repeated in the log.
-
-The local frontend and the installed Codex are separate processes. Codex
-credentials remain in the local `CODEX_HOME`; this project neither imports nor
-reuses them for its own user or host authentication.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for accepted architecture and future
-remote constraints, [MULTI_AGENT_SPEC.md](MULTI_AGENT_SPEC.md) for requirements,
-[ROADMAP.md](ROADMAP.md) for phases and gates, and [TODO.md](TODO.md) for atomic
-task status. [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) records the current
-Linux/macOS evidence, gaps, required CI matrix and manual smoke checks.
+Licensed under the [Apache License 2.0](LICENSE).
