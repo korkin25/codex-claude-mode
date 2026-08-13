@@ -140,6 +140,7 @@ struct App {
     update_result: Option<Receiver<std::result::Result<String, String>>>,
     clipboard_images: clipboard::ClipboardImages,
     clipboard_capture: Option<clipboard::ClipboardCapture>,
+    clipboard_target: Option<ui::ClipboardTarget>,
 }
 
 fn main() -> Result<()> {
@@ -179,6 +180,7 @@ fn main() -> Result<()> {
         update_result: None,
         clipboard_images: clipboard::ClipboardImages::new(),
         clipboard_capture: None,
+        clipboard_target: None,
     };
     run_terminal(&mut app)
 }
@@ -478,11 +480,18 @@ fn resume_terminal_features(writer: &mut impl io::Write) -> Result<()> {
 impl App {
     fn start_clipboard_capture(&mut self) {
         if self.clipboard_capture.is_some() {
-            self.workspace.status_line = "reading image from clipboard…".to_string();
+            self.workspace
+                .set_clipboard_notice("already reading clipboard…");
             return;
         }
+        let Some(target) = self.workspace.clipboard_target() else {
+            self.workspace
+                .set_clipboard_notice("close the current overlay before pasting");
+            return;
+        };
+        self.clipboard_target = Some(target);
         self.clipboard_capture = Some(clipboard::ClipboardImages::capture_in_background());
-        self.workspace.status_line = "reading image from clipboard…".to_string();
+        self.workspace.set_clipboard_notice("reading clipboard…");
     }
 
     fn poll_clipboard_capture(&mut self) {
@@ -494,18 +503,43 @@ impl App {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.clipboard_capture = None;
-                self.workspace.status_line = "clipboard image worker stopped".to_string();
+                self.clipboard_target = None;
+                self.workspace
+                    .set_clipboard_notice("clipboard worker stopped");
                 return;
             }
         };
         self.clipboard_capture = None;
-        match result.and_then(|captured| self.clipboard_images.store(captured)) {
-            Ok(image) => {
-                self.workspace
-                    .attach_image(image.path, image.format, image.size);
-                self.workspace.status_line = "image pasted from clipboard".to_string();
+        let target = self.clipboard_target.take();
+        let target_is_current = target
+            .as_ref()
+            .is_some_and(|target| self.workspace.clipboard_target().as_ref() == Some(target));
+        match result {
+            Ok(clipboard::CapturedClipboard::Image(captured)) => {
+                if !target_is_current {
+                    self.workspace
+                        .set_clipboard_notice("clipboard changed; paste cancelled");
+                    return;
+                }
+                match self.clipboard_images.store(captured) {
+                    Ok(image) => {
+                        self.workspace
+                            .attach_image(image.path, image.format, image.size);
+                        self.workspace.set_clipboard_notice("image pasted");
+                    }
+                    Err(error) => self.workspace.set_clipboard_notice(error.to_string()),
+                }
             }
-            Err(error) => self.workspace.status_line = error.to_string(),
+            Ok(clipboard::CapturedClipboard::Text(text)) => {
+                if target.is_some_and(|target| self.workspace.insert_clipboard_text(&target, text))
+                {
+                    self.workspace.set_clipboard_notice("text pasted");
+                } else {
+                    self.workspace
+                        .set_clipboard_notice("clipboard changed; paste cancelled");
+                }
+            }
+            Err(error) => self.workspace.set_clipboard_notice(error.to_string()),
         }
     }
 

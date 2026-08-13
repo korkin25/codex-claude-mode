@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.11 — 2026-08-14
+
+- Changed `Alt-I` into one explicit clipboard action: it attaches PNG/JPEG
+  images when available and otherwise pastes UTF-8 text on Linux and macOS.
+- Hardened clipboard helpers with bounded output, timeouts, cancellation and
+  process cleanup, while rejecting results after the composer or overlay changes.
+- Added a visible clipboard status notice and made vertical navigation keys
+  scroll the selected log while horizontal keys continue to switch agents.
+
 ## 0.4.10 — 2026-08-13
 
 - Fixed the checksum path stored inside release archives so `SHA256SUMS` can be

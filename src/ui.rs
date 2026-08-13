@@ -222,6 +222,12 @@ struct PastedImage {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClipboardTarget {
+    composer_generation: u64,
+    overlay_epoch: u64,
+}
+
 pub(crate) struct Workspace {
     pub(crate) threads: HashMap<String, AgentThread>,
     pub(crate) order: Vec<String>,
@@ -271,6 +277,9 @@ pub(crate) struct Workspace {
     patch_open: bool,
     patch_scroll: u16,
     project_browser: Option<ProjectBrowser>,
+    clipboard_notice: Option<String>,
+    composer_generation: u64,
+    overlay_epoch: u64,
 }
 
 impl Workspace {
@@ -324,10 +333,14 @@ impl Workspace {
             patch_open: false,
             patch_scroll: 0,
             project_browser: None,
+            clipboard_notice: None,
+            composer_generation: 0,
+            overlay_epoch: 0,
         }
     }
 
     pub(crate) fn show_session_picker(&mut self, candidates: Vec<SessionCandidate>) {
+        self.bump_overlay_epoch();
         self.session_picker = Some(SessionPicker {
             candidates,
             selected: 0,
@@ -337,6 +350,7 @@ impl Workspace {
     }
 
     pub(crate) fn clear_session_picker(&mut self) {
+        self.bump_overlay_epoch();
         self.session_picker = None;
         self.session_hitboxes.clear();
     }
@@ -347,6 +361,7 @@ impl Workspace {
         choices: Vec<PermissionChoice>,
         current: Option<&str>,
     ) {
+        self.bump_overlay_epoch();
         let selected = current
             .and_then(|current| choices.iter().position(|choice| choice.id == current))
             .unwrap_or(0);
@@ -366,6 +381,55 @@ impl Workspace {
     pub(crate) fn set_completion_cwd(&mut self, cwd: PathBuf) {
         self.completion_cwd = cwd;
         self.completion_popup = None;
+    }
+
+    pub(crate) fn set_clipboard_notice(&mut self, notice: impl Into<String>) {
+        self.clipboard_notice = Some(notice.into());
+    }
+
+    pub(crate) fn clipboard_target(&self) -> Option<ClipboardTarget> {
+        (self.prompt.is_none()
+            && self.session_picker.is_none()
+            && self.permission_picker.is_none()
+            && !self.info_open
+            && !self.patch_open
+            && self.project_browser.is_none())
+        .then_some(ClipboardTarget {
+            composer_generation: self.composer_generation,
+            overlay_epoch: self.overlay_epoch,
+        })
+    }
+
+    fn bump_overlay_epoch(&mut self) {
+        self.overlay_epoch = self.overlay_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn insert_clipboard_text(
+        &mut self,
+        expected: &ClipboardTarget,
+        text: String,
+    ) -> bool {
+        if self.clipboard_target().as_ref() != Some(expected) {
+            return false;
+        }
+        self.handle_paste(text);
+        true
+    }
+
+    fn render_clipboard_notice(&self, frame: &mut Frame) {
+        let Some(notice) = self.clipboard_notice.as_ref() else {
+            return;
+        };
+        let area = Rect::new(frame.area().x, frame.area().y, frame.area().width, 1);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(
+                format!(" Clipboard · {notice}")
+                    .fg(APP_BACKGROUND)
+                    .bg(ACCENT_CYAN),
+            ),
+            area,
+        );
     }
 
     pub(crate) fn set_skills(&mut self, skills: Vec<SkillChoice>) {
@@ -407,6 +471,7 @@ impl Workspace {
     }
 
     pub(crate) fn show_session_starting(&mut self) {
+        self.bump_overlay_epoch();
         match self.session_picker.as_mut() {
             Some(picker) => picker.starting_new = true,
             None => {
@@ -457,6 +522,14 @@ impl Workspace {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if matches!(key.code, KeyCode::Char('i' | 'I'))
+            && (key.modifiers == KeyModifiers::ALT
+                || key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT)
+        {
+            return Action::PasteImage;
+        }
+        self.composer_generation = self.composer_generation.wrapping_add(1);
+        self.overlay_epoch = self.overlay_epoch.wrapping_add(1);
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Action::Quit;
         }
@@ -507,12 +580,16 @@ impl Workspace {
                     let target_id = picker.target_id.clone();
                     let profile_id = picker.choices[picker.selected].id.clone();
                     self.permission_picker = None;
+                    self.bump_overlay_epoch();
                     return Action::PermissionSelected {
                         target_id,
                         profile_id,
                     };
                 }
-                KeyCode::Esc => self.permission_picker = None,
+                KeyCode::Esc => {
+                    self.permission_picker = None;
+                    self.bump_overlay_epoch();
+                }
                 _ => {}
             }
             return Action::None;
@@ -586,9 +663,11 @@ impl Workspace {
             match key.code {
                 KeyCode::Char('q') => {
                     self.patch_open = false;
+                    self.bump_overlay_epoch();
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.patch_open = false;
+                    self.bump_overlay_epoch();
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.patch_scroll = self.patch_scroll.saturating_sub(5)
@@ -616,6 +695,7 @@ impl Workspace {
                 && prompt.patch_text().is_some()
             {
                 self.patch_open = true;
+                self.bump_overlay_epoch();
                 self.patch_scroll = 0;
                 return Action::None;
             }
@@ -659,7 +739,10 @@ impl Workspace {
                 return Action::None;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.info_open = false,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => {
+                    self.info_open = false;
+                    self.bump_overlay_epoch();
+                }
                 KeyCode::Char('u') | KeyCode::Char('U') if self.codex_update_available() => {
                     self.codex_update_confirm = true;
                 }
@@ -679,6 +762,7 @@ impl Workspace {
                 BrowserAction::None => Action::None,
                 BrowserAction::Close => {
                     self.project_browser = None;
+                    self.bump_overlay_epoch();
                     Action::None
                 }
                 BrowserAction::OpenEditor { editor, path } => match editor {
@@ -738,9 +822,6 @@ impl Workspace {
                 }
                 match key.code {
                     KeyCode::Esc => self.mode = Mode::Navigation,
-                    KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::ALT) => {
-                        return Action::PasteImage;
-                    }
                     KeyCode::Left => {
                         self.move_cursor_left();
                         self.refresh_skill_popup();
@@ -800,10 +881,12 @@ impl Workspace {
                         })
                         .unwrap_or_else(|| self.completion_cwd.clone());
                     self.project_browser = Some(ProjectBrowser::open(root));
+                    self.bump_overlay_epoch();
                 }
                 KeyCode::Char('i') => {
                     self.info_open = true;
                     self.info_scroll = 0;
+                    self.bump_overlay_epoch();
                 }
                 KeyCode::Char(character)
                     if !key
@@ -814,18 +897,20 @@ impl Workspace {
                     self.insert_at_cursor(&character.to_string());
                     self.history_cursor = None;
                 }
-                KeyCode::Left | KeyCode::Up => {
+                KeyCode::Left => {
                     self.selected = self.selected.saturating_sub(1);
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
                 }
-                KeyCode::Right | KeyCode::Down => {
+                KeyCode::Right => {
                     self.selected = (self.selected + 1).min(self.order.len().saturating_sub(1));
                     self.scroll = u16::MAX;
                     return Action::SelectionChanged;
                 }
-                KeyCode::PageUp => self.scroll_log_up(10),
-                KeyCode::PageDown => self.scroll_log_down(10),
+                KeyCode::Up => self.scroll_log_up(3),
+                KeyCode::Down => self.scroll_log_down(3),
+                KeyCode::PageUp => self.scroll_log_up(self.log_area.height.max(1)),
+                KeyCode::PageDown => self.scroll_log_down(self.log_area.height.max(1)),
                 KeyCode::Home => self.scroll = 0,
                 KeyCode::End => self.scroll = u16::MAX,
                 _ => {}
@@ -835,6 +920,7 @@ impl Workspace {
     }
 
     pub(crate) fn handle_paste(&mut self, text: String) -> Action {
+        self.composer_generation = self.composer_generation.wrapping_add(1);
         if self.session_picker.is_some() || self.info_open || self.permission_picker.is_some() {
             return Action::None;
         }
@@ -980,16 +1066,19 @@ impl Workspace {
         );
         if self.session_picker.is_some() {
             self.render_session_picker(frame);
+            self.render_clipboard_notice(frame);
             return;
         }
         if self.prompt.is_none()
             && let Some(browser) = self.project_browser.as_mut()
         {
             browser.render(frame);
+            self.render_clipboard_notice(frame);
             return;
         }
         if self.patch_open {
             self.render_patch_view(frame);
+            self.render_clipboard_notice(frame);
             return;
         }
         let composer_height =
@@ -1178,10 +1267,12 @@ impl Workspace {
         self.render_metrics(frame, footer[1]);
         if self.info_open {
             self.render_info_overlay(frame);
+            self.render_clipboard_notice(frame);
             return;
         }
         if self.permission_picker.is_some() {
             self.render_permission_picker(frame);
+            self.render_clipboard_notice(frame);
             return;
         }
         let show_cursor = self
@@ -1206,6 +1297,7 @@ impl Workspace {
             }
             frame.set_cursor_position((cursor_x, cursor_y));
         }
+        self.render_clipboard_notice(frame);
     }
 
     fn render_slash_menu(&self, frame: &mut Frame) {
@@ -1688,6 +1780,7 @@ impl Workspace {
     }
 
     pub(crate) fn set_prompt(&mut self, prompt: ServerPrompt) -> Result<(), Box<ServerPrompt>> {
+        self.bump_overlay_epoch();
         if self.prompt.is_some() {
             return Err(Box::new(prompt));
         }
@@ -1953,6 +2046,7 @@ impl Workspace {
     }
 
     pub(crate) fn clear_prompt(&mut self, request_id: &serde_json::Value) {
+        self.bump_overlay_epoch();
         if self
             .prompt
             .as_ref()
@@ -1963,6 +2057,7 @@ impl Workspace {
     }
 
     fn finish_prompt(&mut self) {
+        self.bump_overlay_epoch();
         self.prompt = None;
         self.patch_open = false;
         self.input = self.prompt_draft.take().unwrap_or_default();

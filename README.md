@@ -47,7 +47,7 @@ install into `~/.local/bin`; `sudo` is not required.
 ### Linux x86_64
 
 ```bash
-version="0.4.10"
+version="0.4.11"
 platform="linux-x86_64"
 base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
 curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
@@ -87,7 +87,7 @@ tmp=
 ### macOS Apple Silicon
 
 ```bash
-version="0.4.10"
+version="0.4.11"
 platform="macos-arm64"
 base="https://github.com/korkin25/codex-claude-mode/releases/download/v${version}"
 curl -fLO "${base}/codex-claude-mode-${version}-${platform}.tar.gz"
@@ -160,6 +160,10 @@ passes `--help` to Codex instead of showing the combined wrapper help.
 Shortcuts are mode-specific. In particular, arrow keys move the text cursor in
 **Editing** and switch agents only in **Navigation**.
 
+In **Navigation**, `Left` / `Right` switch agents; `Up` / `Down` scroll the
+selected log by three lines, `PageUp` / `PageDown` scroll by a page, and
+`Home` / `End` jump to the log boundaries.
+
 ### Navigation and logs
 
 | Mode | Keys | Action |
@@ -183,7 +187,7 @@ Shortcuts are mode-specific. In particular, arrow keys move the text cursor in
 | Editing | `PageUp` / `PageDown` | Scroll the log without leaving the composer |
 | Editing | `Enter` | Submit non-empty input |
 | Editing | `Ctrl-U` | Clear the current input |
-| Editing | `Alt-I` | Attach a PNG/JPEG image from the clipboard |
+| Editing | `Alt-I` | Paste from the system clipboard (PNG/JPEG preferred, otherwise text) |
 | Editing | `Tab` | Complete a slash command, executable, or workspace path |
 | Completion menu | `Up` / `Down`, `Enter` or `Tab`, `Esc` | Select, apply, or close completion |
 | Skill menu | Type `$`, then `Up` / `Down`, `Enter` or `Tab`, `Esc` | Filter, insert, or close enabled skill mentions |
@@ -223,7 +227,7 @@ Building requires Rust 1.95:
 ```bash
 git clone https://github.com/korkin25/codex-claude-mode.git
 cd codex-claude-mode || exit
-git checkout v0.4.10
+git checkout v0.4.11
 cargo build --locked --release
 target/release/codex-claude-mode --check-backend
 target/release/codex-claude-mode
@@ -237,11 +241,16 @@ target/release/codex-claude-mode
   in `CODEX_HOME`; this project does not provide separate authentication.
 - Older saved parent-owned agents are read-only because direct replies could be
   copied into Main. Create a new direct sub-agent instead.
-- Clipboard images require `wl-paste` (preferred) or `xclip` on Linux, and the
-  optional `pngpaste` utility on macOS. Text paste uses terminal bracketed-paste
-  support and multiline text is shown as one compact placeholder.
+- Explicit `Alt-I` clipboard paste requires `wl-paste` (preferred) or `xclip`
+  on Linux. On macOS, images use optional `pngpaste` and text uses `pbpaste`.
+  PNG/JPEG is preferred when the clipboard offers both image and text. Normal
+  terminal paste remains bracketed text paste, and multiline text is shown as
+  one compact placeholder. In a Wayland session, `wl-paste` is required and the
+  app does not silently try X11 `xclip`. Because `xclip` and `pngpaste` expose no
+  portable type-query API, fallback to text recognizes only their known
+  "type/image unavailable" diagnostics; other failures are reported as errors.
 - Multi-provider orchestration, a durable agent bus, and remote integrations are
-  roadmap items, not features in v0.4.10.
+  roadmap items, not features in v0.4.11.
 
 To update, repeat the verified release download with a newer version. To
 uninstall:

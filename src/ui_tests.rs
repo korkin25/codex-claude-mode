@@ -168,6 +168,37 @@ fn horizontal_arrows_select_agents_in_navigation_mode() {
 }
 
 #[test]
+fn navigation_vertical_keys_scroll_without_selecting_agents() {
+    let mut workspace = Workspace::new();
+    workspace.order = vec!["main".to_string(), "child".to_string()];
+    workspace.mode = Mode::Navigation;
+    workspace.selected = 1;
+    workspace.last_max_scroll = 100;
+    workspace.scroll = 50;
+    workspace.log_area.height = 12;
+
+    for (key, expected) in [
+        (KeyCode::Up, 47),
+        (KeyCode::Down, 50),
+        (KeyCode::PageUp, 38),
+        (KeyCode::PageDown, 50),
+        (KeyCode::Home, 0),
+    ] {
+        assert!(matches!(
+            workspace.handle_key(KeyEvent::new(key, KeyModifiers::NONE)),
+            Action::None
+        ));
+        assert_eq!(workspace.scroll, expected);
+        assert_eq!(workspace.selected, 1);
+        assert_eq!(workspace.mode, Mode::Navigation);
+    }
+
+    workspace.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(workspace.scroll, u16::MAX);
+    assert_eq!(workspace.selected, 1);
+}
+
+#[test]
 fn editing_horizontal_arrows_move_unicode_cursor_without_selecting_agents() {
     let mut workspace = Workspace::new();
     workspace.order = vec!["main".to_string(), "child".to_string()];
@@ -273,7 +304,12 @@ fn page_up_from_bottom_scrolls_long_main_log_on_first_press() {
         let max_scroll = workspace.last_max_scroll;
         assert_eq!(workspace.scroll, u16::MAX);
         workspace.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-        assert_eq!(workspace.scroll, max_scroll - 10);
+        let page = if mode == Mode::Navigation {
+            workspace.log_area.height
+        } else {
+            10
+        };
+        assert_eq!(workspace.scroll, max_scroll - page);
         assert_eq!(workspace.mode, mode);
     }
 }
@@ -930,6 +966,138 @@ fn alt_i_requests_an_image_paste_without_inserting_text() {
         Action::PasteImage
     ));
     assert!(workspace.input.is_empty());
+}
+
+#[test]
+fn escape_then_i_opens_info_without_requesting_clipboard_paste() {
+    let mut workspace = Workspace::new();
+    workspace.input = "draft".to_string();
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        Action::None
+    ));
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+        Action::None
+    ));
+    assert!(workspace.info_open);
+    assert_eq!(workspace.mode, Mode::Navigation);
+    assert_eq!(workspace.input, "draft");
+}
+
+#[test]
+fn shifted_alt_i_requests_clipboard_paste() {
+    let mut workspace = Workspace::new();
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(
+            KeyCode::Char('I'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT
+        )),
+        Action::PasteImage
+    ));
+}
+
+#[test]
+fn ctrl_alt_i_does_not_request_clipboard_paste() {
+    let mut workspace = Workspace::new();
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        )),
+        Action::None
+    ));
+}
+
+#[test]
+fn alt_i_requests_clipboard_paste_in_navigation() {
+    let mut workspace = Workspace::new();
+    workspace.mode = Mode::Navigation;
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT)),
+        Action::PasteImage
+    ));
+    assert_eq!(workspace.mode, Mode::Navigation);
+}
+
+#[test]
+fn clipboard_notice_renders_above_nonempty_log_and_info_overlay() {
+    let mut workspace = workspace_with_long_main_log(Mode::Navigation);
+    workspace.set_clipboard_notice("reading clipboard…");
+    let backend = TestBackend::new(60, 14);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render clipboard notice");
+    assert!(buffer_text(terminal.backend().buffer()).contains("Clipboard · reading clipboard"));
+
+    workspace.info_open = true;
+    workspace.set_clipboard_notice("clipboard failed");
+    terminal
+        .draw(|frame| workspace.render(frame))
+        .expect("render notice above overlay");
+    assert!(buffer_text(terminal.backend().buffer()).contains("Clipboard · clipboard failed"));
+}
+
+#[test]
+fn clipboard_result_is_rejected_after_composer_or_overlay_changes() {
+    let mut workspace = Workspace::new();
+    workspace.input = "draft".to_string();
+    let target = workspace.clipboard_target().expect("clipboard target");
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(!workspace.insert_clipboard_text(&target, "paste".to_string()));
+    assert_eq!(workspace.input, "draftx");
+
+    let target = workspace.clipboard_target().expect("clipboard target");
+    workspace.info_open = true;
+    assert!(!workspace.insert_clipboard_text(&target, "paste".to_string()));
+    assert_eq!(workspace.input, "draftx");
+}
+
+#[test]
+fn clipboard_generation_rejects_aba_edit_restore_and_overlay_open_close() {
+    let mut workspace = Workspace::new();
+    workspace.input = "draft".to_string();
+    let target = workspace.clipboard_target().expect("clipboard target");
+    workspace.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    workspace.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(workspace.input, "draft");
+    assert!(!workspace.insert_clipboard_text(&target, "paste".to_string()));
+
+    let target = workspace.clipboard_target().expect("clipboard target");
+    workspace.info_open = true;
+    workspace.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!workspace.info_open);
+    assert!(!workspace.insert_clipboard_text(&target, "paste".to_string()));
+}
+
+#[test]
+fn direct_overlay_show_clear_rejects_stale_image_and_text_with_identical_composer() {
+    let mut workspace = Workspace::new();
+    workspace.input = "unchanged".to_string();
+    let image_target = workspace.clipboard_target().expect("image target");
+    workspace.show_session_picker(Vec::new());
+    workspace.clear_session_picker();
+    assert_eq!(workspace.input, "unchanged");
+    assert_ne!(workspace.clipboard_target(), Some(image_target));
+
+    let text_target = workspace.clipboard_target().expect("text target");
+    workspace.show_permission_picker(
+        "main".to_string(),
+        vec![PermissionChoice {
+            id: "read-only".to_string(),
+            description: "Safe".to_string(),
+        }],
+        None,
+    );
+    workspace.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(workspace.input, "unchanged");
+    assert!(!workspace.insert_clipboard_text(&text_target, "paste".to_string()));
+    assert_eq!(workspace.input, "unchanged");
 }
 
 #[test]
