@@ -53,6 +53,7 @@ use serde_json::json;
 use session::candidates_from_list;
 use ui::Action;
 use ui::PermissionChoice;
+use ui::SessionSelection;
 use ui::SkillChoice;
 use ui::Submission;
 use ui::SubmissionInput;
@@ -102,8 +103,17 @@ struct Args {
 #[derive(Debug)]
 enum Pending {
     Initialize,
-    List,
-    Descendants(String),
+    List {
+        generation: u64,
+    },
+    Descendants {
+        root_id: String,
+        generation: u64,
+    },
+    OpenThread {
+        thread_id: String,
+        resume_cwd: PathBuf,
+    },
     Read(String),
     Start,
     ResumeAndSend {
@@ -123,6 +133,26 @@ enum Pending {
     PermissionUpdate,
 }
 
+const MAX_LIST_PAGES: usize = 100;
+const MAX_LIST_ITEMS: usize = 20_000;
+
+struct ListChain {
+    generation: u64,
+    all_workspaces: bool,
+    pages: usize,
+    cursors: HashSet<String>,
+    ids: HashSet<String>,
+    threads: Vec<Value>,
+}
+
+struct DescendantChain {
+    generation: u64,
+    root_id: String,
+    pages: usize,
+    cursors: HashSet<String>,
+    ids: HashSet<String>,
+}
+
 struct App {
     backend: Backend,
     workspace: Workspace,
@@ -133,6 +163,7 @@ struct App {
     session_decided: bool,
     starting_new_session: bool,
     cwd: PathBuf,
+    active_session_cwd: PathBuf,
     last_refresh: Instant,
     permission_profiles: HashMap<String, String>,
     codex: PathBuf,
@@ -141,6 +172,11 @@ struct App {
     clipboard_images: clipboard::ClipboardImages,
     clipboard_capture: Option<clipboard::ClipboardCapture>,
     clipboard_target: Option<ui::ClipboardTarget>,
+    list_generation: u64,
+    list_chain: Option<ListChain>,
+    descendants_generation: u64,
+    descendants_chain: Option<DescendantChain>,
+    codex_home_was_empty: bool,
 }
 
 fn main() -> Result<()> {
@@ -151,6 +187,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let codex_home = args.codex_home.unwrap_or_else(default_codex_home);
+    let codex_home_was_empty = directory_is_empty_or_missing(&codex_home);
     let cwd = args
         .cwd
         .unwrap_or(env::current_dir().context("failed to read cwd")?);
@@ -162,6 +199,7 @@ fn main() -> Result<()> {
     let initialize_id = backend.initialize()?;
     let mut workspace = Workspace::new();
     workspace.set_completion_cwd(cwd.clone());
+    workspace.set_codex_home(codex_home.clone(), codex_home_was_empty);
     workspace.set_codex_versions(codex_version.current, codex_version.latest);
     let mut app = App {
         backend,
@@ -172,6 +210,7 @@ fn main() -> Result<()> {
         session_decided: args.thread.is_some(),
         starting_new_session: false,
         preferred_root: args.thread,
+        active_session_cwd: cwd.clone(),
         cwd,
         last_refresh: Instant::now(),
         permission_profiles: HashMap::new(),
@@ -181,6 +220,11 @@ fn main() -> Result<()> {
         clipboard_images: clipboard::ClipboardImages::new(),
         clipboard_capture: None,
         clipboard_target: None,
+        list_generation: 0,
+        list_chain: None,
+        descendants_generation: 0,
+        descendants_chain: None,
+        codex_home_was_empty,
     };
     run_terminal(&mut app)
 }
@@ -274,7 +318,7 @@ fn check_backend(
                     anyhow::bail!("initialize failed: {error}");
                 }
                 backend.initialized()?;
-                let list_id = backend.request("thread/list", list_params(cwd))?;
+                let list_id = backend.request("thread/list", list_params(Some(cwd), None))?;
                 loop {
                     match backend.recv_timeout(Duration::from_secs(10)) {
                         Some(BackendEvent::Message(message))
@@ -358,9 +402,9 @@ fn run_event_loop(
             && app
                 .pending
                 .values()
-                .all(|pending| !matches!(pending, Pending::List))
+                .all(|pending| !matches!(pending, Pending::List { .. }))
         {
-            app.request_list()?;
+            app.request_list(false, None)?;
         }
         terminal.draw(|frame| app.workspace.render(frame))?;
         if !event::poll(Duration::from_millis(50))? {
@@ -379,7 +423,7 @@ fn run_event_loop(
             Action::SelectionChanged => app.read_selected()?,
             Action::ResolvePrompt(resolution) => app.resolve_prompt(resolution)?,
             Action::Interrupt => app.interrupt_selected()?,
-            Action::SessionSelected(root_id) => app.select_session(root_id)?,
+            Action::SessionSelected(selection) => app.select_session(selection)?,
             Action::ChooseSession => app.choose_session()?,
             Action::NewSession => app.select_session(None)?,
             Action::UpdateCodex => app.start_codex_update(),
@@ -640,7 +684,40 @@ impl App {
             if matches!(&pending, Pending::Start) {
                 self.starting_new_session = false;
                 self.session_decided = false;
-                self.request_list()?;
+                self.request_list(false, None)?;
+            } else if let Pending::OpenThread { thread_id, .. } = pending {
+                // Keep the explicit-thread failure terminal until the user
+                // deliberately chooses another session.  Marking session
+                // selection undecided here would make the event loop
+                // immediately issue thread/list and overwrite this error,
+                // making a failed --thread look like a normal picker launch.
+                self.session_decided = true;
+                self.preferred_root = None;
+                self.workspace.status_line = format!("could not open thread {thread_id}: {error}");
+                return Ok(());
+            } else if let Pending::List { generation } = &pending {
+                if self
+                    .list_chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.generation == *generation)
+                {
+                    self.list_chain = None;
+                    self.workspace.status_line = format!("could not list sessions: {error}");
+                }
+                return Ok(());
+            } else if let Pending::Descendants {
+                root_id,
+                generation,
+            } = &pending
+            {
+                if self.descendants_chain.as_ref().is_some_and(|chain| {
+                    chain.generation == *generation && chain.root_id == *root_id
+                }) {
+                    self.descendants_chain = None;
+                    self.workspace.status_line =
+                        format!("could not list sub-agents for {root_id}: {error}");
+                }
+                return Ok(());
             }
             self.workspace.status_line = format!("app-server error: {error}");
             return Ok(());
@@ -660,10 +737,45 @@ impl App {
                         .unwrap_or("Codex")
                 );
                 self.request_skills(false, false)?;
-                self.request_list()?;
+                if let Some(thread_id) = self.preferred_root.clone() {
+                    let id = self
+                        .backend
+                        .request("thread/resume", thread_resume_params(&thread_id, &self.cwd))?;
+                    self.pending.insert(
+                        id,
+                        Pending::OpenThread {
+                            thread_id,
+                            resume_cwd: self.cwd.clone(),
+                        },
+                    );
+                } else {
+                    self.request_list(false, None)?;
+                }
             }
-            Pending::List => self.apply_list(result)?,
-            Pending::Descendants(root_id) => self.apply_descendants(&root_id, result)?,
+            Pending::List { generation } => self.apply_list(result, generation)?,
+            Pending::Descendants {
+                root_id,
+                generation,
+            } => self.apply_descendants(&root_id, generation, result)?,
+            Pending::OpenThread {
+                thread_id,
+                resume_cwd,
+            } => {
+                let thread = result.get("thread").unwrap_or(result);
+                if AgentThread::from_json(thread).is_none() {
+                    self.session_decided = true;
+                    self.preferred_root = None;
+                    self.workspace.status_line = format!("thread {thread_id} was not found");
+                } else {
+                    self.active_session_cwd = resume_cwd;
+                    self.upsert_thread(thread);
+                    self.preferred_root = Some(thread_id.clone());
+                    self.loaded_history.insert(thread_id.clone());
+                    self.workspace.rebuild_tree(Some(&thread_id));
+                    self.workspace.status_line = format!("opened {thread_id}");
+                    self.request_descendants(None)?;
+                }
+            }
             Pending::Read(thread_id) => {
                 if let Some(thread) = result.get("thread") {
                     self.upsert_thread(thread);
@@ -674,6 +786,7 @@ impl App {
             }
             Pending::Start => {
                 if let Some(thread) = result.get("thread") {
+                    self.active_session_cwd = self.cwd.clone();
                     self.starting_new_session = false;
                     self.workspace.clear_session_picker();
                     self.upsert_thread(thread);
@@ -706,28 +819,97 @@ impl App {
         Ok(())
     }
 
-    fn request_list(&mut self) -> Result<()> {
-        let id = self
-            .backend
-            .request("thread/list", list_params(&self.cwd))?;
-        self.pending.insert(id, Pending::List);
+    fn request_list(&mut self, all_workspaces: bool, cursor: Option<&str>) -> Result<()> {
+        if cursor.is_none() {
+            self.list_generation = self.list_generation.wrapping_add(1);
+            self.list_chain = Some(ListChain {
+                generation: self.list_generation,
+                all_workspaces,
+                pages: 0,
+                cursors: HashSet::new(),
+                ids: HashSet::new(),
+                threads: Vec::new(),
+            });
+        }
+        let generation = self.list_generation;
+        let id = self.backend.request(
+            "thread/list",
+            list_params((!all_workspaces).then_some(self.cwd.as_path()), cursor),
+        )?;
+        self.pending.insert(id, Pending::List { generation });
         self.last_refresh = Instant::now();
         Ok(())
     }
 
-    fn apply_list(&mut self, result: &Value) -> Result<()> {
+    fn apply_list(&mut self, result: &Value, generation: u64) -> Result<()> {
+        let Some(chain) = self.list_chain.as_mut() else {
+            return Ok(());
+        };
+        if chain.generation != generation {
+            return Ok(());
+        }
+        chain.pages += 1;
+        if chain.pages > MAX_LIST_PAGES {
+            self.list_chain = None;
+            self.workspace.status_line =
+                "session list stopped: pagination exceeded 100 pages".to_string();
+            return Ok(());
+        }
         for thread in result
             .get("data")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
+            let Some(id) = thread.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if chain.ids.insert(id.to_string()) {
+                chain.threads.push(thread.clone());
+            }
+            if chain.threads.len() > MAX_LIST_ITEMS {
+                self.list_chain = None;
+                self.workspace.status_line =
+                    "session list stopped: pagination exceeded 20000 unique threads".to_string();
+                return Ok(());
+            }
+        }
+        if let Some(cursor) = result.get("nextCursor").and_then(Value::as_str) {
+            let all_workspaces = chain.all_workspaces;
+            if !chain.cursors.insert(cursor.to_string()) {
+                self.list_chain = None;
+                self.workspace.status_line =
+                    "session list stopped: backend repeated a pagination cursor".to_string();
+                return Ok(());
+            }
+            return self.request_list(all_workspaces, Some(cursor));
+        }
+        let Some(chain) = self.list_chain.take() else {
+            return Ok(());
+        };
+        let all_workspaces = chain.all_workspaces;
+        for thread in &chain.threads {
             self.upsert_thread(thread);
         }
         if !self.session_decided {
+            let merged = json!({"data": chain.threads});
             self.workspace
-                .show_session_picker(candidates_from_list(result));
-            self.workspace.status_line = "choose a session".to_string();
+                .show_session_picker(candidates_from_list(&merged));
+            let scope = if all_workspaces {
+                "all workspaces"
+            } else {
+                "this workspace"
+            };
+            let storage = if self.codex_home_was_empty {
+                " · warning: storage was new or empty at startup"
+            } else {
+                ""
+            };
+            self.workspace.status_line = format!(
+                "choose a session from {scope} · CODEX_HOME={}{}",
+                self.codex_home.display(),
+                storage
+            );
             return Ok(());
         }
         self.workspace.rebuild_tree(self.preferred_root.as_deref());
@@ -739,20 +921,49 @@ impl App {
             self.workspace.status_line = "creating Main thread…".to_string();
             return Ok(());
         }
-        self.request_descendants()?;
+        self.request_descendants(None)?;
         self.request_unloaded_history()
     }
 
-    fn select_session(&mut self, root_id: Option<String>) -> Result<()> {
+    fn select_session(&mut self, selection: Option<SessionSelection>) -> Result<()> {
         self.session_decided = true;
-        if let Some(root_id) = root_id {
+        if let Some(selection) = selection {
+            let root_id = selection.id;
+            let resume_cwd = if selection.use_saved_cwd {
+                let saved = PathBuf::from(&selection.saved_cwd);
+                if selection.saved_cwd.is_empty() || !saved.is_dir() {
+                    self.session_decided = false;
+                    self.workspace.status_line =
+                        "saved workspace is missing; press c to resume in the current directory"
+                            .to_string();
+                    return Ok(());
+                }
+                if is_trash_path(&saved) {
+                    self.session_decided = false;
+                    self.workspace.status_line =
+                        "saved workspace is in Trash; press c to resume in the current directory"
+                            .to_string();
+                    return Ok(());
+                }
+                saved
+            } else {
+                self.cwd.clone()
+            };
             self.workspace.clear_session_picker();
             self.starting_new_session = false;
             self.preferred_root = Some(root_id.clone());
-            self.workspace.rebuild_tree(Some(&root_id));
             self.workspace.status_line = format!("opening {root_id}…");
-            self.request_descendants()?;
-            self.request_unloaded_history()
+            let id = self
+                .backend
+                .request("thread/resume", thread_resume_params(&root_id, &resume_cwd))?;
+            self.pending.insert(
+                id,
+                Pending::OpenThread {
+                    thread_id: root_id,
+                    resume_cwd,
+                },
+            );
+            Ok(())
         } else {
             self.starting_new_session = true;
             self.workspace.show_session_starting();
@@ -774,21 +985,37 @@ impl App {
     fn choose_session(&mut self) -> Result<()> {
         self.session_decided = false;
         self.starting_new_session = false;
-        self.workspace.status_line = "loading saved sessions…".to_string();
-        self.request_list()
+        self.workspace.status_line = format!(
+            "loading all saved sessions · CODEX_HOME={}",
+            self.codex_home.display()
+        );
+        self.request_list(true, None)
     }
 
-    fn request_descendants(&mut self) -> Result<()> {
+    fn request_descendants(&mut self, cursor: Option<&str>) -> Result<()> {
         let Some(root_id) = self.workspace.root_id.clone() else {
             return Ok(());
         };
-        if self
-            .pending
-            .values()
-            .any(|pending| matches!(pending, Pending::Descendants(id) if id == &root_id))
-        {
-            return Ok(());
+        if cursor.is_none() {
+            self.descendants_generation = self.descendants_generation.wrapping_add(1);
+            self.descendants_chain = Some(DescendantChain {
+                generation: self.descendants_generation,
+                root_id: root_id.clone(),
+                pages: 0,
+                cursors: HashSet::new(),
+                ids: HashSet::new(),
+            });
         }
+        let generation = self.descendants_generation;
+        self.request_descendants_page(&root_id, generation, cursor)
+    }
+
+    fn request_descendants_page(
+        &mut self,
+        root_id: &str,
+        generation: u64,
+        cursor: Option<&str>,
+    ) -> Result<()> {
         let id = self.backend.request(
             "thread/list",
             json!({
@@ -803,23 +1030,72 @@ impl App {
                     "subAgentOther"
                 ],
                 "archived": false,
-                "ancestorThreadId": root_id
+                "ancestorThreadId": root_id,
+                "cursor": cursor
             }),
         )?;
-        self.pending.insert(id, Pending::Descendants(root_id));
+        self.pending.insert(
+            id,
+            Pending::Descendants {
+                root_id: root_id.to_string(),
+                generation,
+            },
+        );
         Ok(())
     }
 
-    fn apply_descendants(&mut self, root_id: &str, result: &Value) -> Result<()> {
+    fn apply_descendants(&mut self, root_id: &str, generation: u64, result: &Value) -> Result<()> {
+        let Some(chain) = self.descendants_chain.as_mut() else {
+            return Ok(());
+        };
+        if chain.generation != generation || chain.root_id != root_id {
+            return Ok(());
+        }
+        chain.pages += 1;
+        if chain.pages > MAX_LIST_PAGES {
+            self.descendants_chain = None;
+            self.workspace.status_line =
+                "sub-agent list stopped: pagination exceeded 100 pages".to_string();
+            return Ok(());
+        }
+        let mut unique = Vec::new();
         for thread in result
             .get("data")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
+            let Some(id) = thread.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if chain.ids.insert(id.to_string()) {
+                unique.push(thread.clone());
+            }
+            if chain.ids.len() > MAX_LIST_ITEMS {
+                self.descendants_chain = None;
+                self.workspace.status_line =
+                    "sub-agent list stopped: pagination exceeded 20000 unique threads".to_string();
+                return Ok(());
+            }
+        }
+        for thread in &unique {
             self.upsert_thread(thread);
         }
         self.workspace.rebuild_tree(Some(root_id));
+        if let Some(cursor) = result.get("nextCursor").and_then(Value::as_str) {
+            let chain = self
+                .descendants_chain
+                .as_mut()
+                .expect("active descendant chain");
+            if !chain.cursors.insert(cursor.to_string()) {
+                self.descendants_chain = None;
+                self.workspace.status_line =
+                    "sub-agent list stopped: backend repeated a pagination cursor".to_string();
+                return Ok(());
+            }
+            return self.request_descendants_page(root_id, generation, Some(cursor));
+        }
+        self.descendants_chain = None;
         self.request_unloaded_history()
     }
 
@@ -914,9 +1190,10 @@ impl App {
         if can_send {
             self.start_turn(&target_id, &submission.input)
         } else {
-            let id = self
-                .backend
-                .request("thread/resume", json!({"threadId": target_id}))?;
+            let id = self.backend.request(
+                "thread/resume",
+                thread_resume_params(&target_id, &self.active_session_cwd),
+            )?;
             self.pending.insert(
                 id,
                 Pending::ResumeAndSend {
@@ -1346,15 +1623,37 @@ impl App {
     }
 }
 
-fn list_params(cwd: &std::path::Path) -> Value {
-    json!({
+fn list_params(cwd: Option<&std::path::Path>, cursor: Option<&str>) -> Value {
+    let mut params = json!({
         "limit": 200,
         "sortKey": "updated_at",
         "sortDirection": "desc",
         "sourceKinds": SOURCE_KINDS,
         "archived": false,
-        "cwd": cwd.to_string_lossy()
+        "cursor": cursor
+    });
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd.to_string_lossy());
+    }
+    params
+}
+
+fn thread_resume_params(thread_id: &str, cwd: &std::path::Path) -> Value {
+    json!({"threadId": thread_id, "cwd": cwd.to_string_lossy()})
+}
+
+fn is_trash_path(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        component.eq_ignore_ascii_case("trash")
+            || component.to_ascii_lowercase().starts_with(".trash")
     })
+}
+
+fn directory_is_empty_or_missing(path: &std::path::Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true)
 }
 
 fn permission_update_params(thread_id: &str, profile_id: &str) -> Value {

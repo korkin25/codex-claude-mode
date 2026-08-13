@@ -187,7 +187,7 @@ selected log by three lines, `PageUp` / `PageDown` scroll by a page, and
 | Editing | `PageUp` / `PageDown` | Scroll the log without leaving the composer |
 | Editing | `Enter` | Submit non-empty input |
 | Editing | `Ctrl-U` | Clear the current input |
-| Editing | `Alt-I` | Paste from the system clipboard (PNG/JPEG preferred, otherwise text) |
+| Any | `Alt-I` or `F6` | Paste from the system clipboard (PNG/JPEG preferred, otherwise text); `F6` is the terminal-safe fallback |
 | Editing | `Tab` | Complete a slash command, executable, or workspace path |
 | Completion menu | `Up` / `Down`, `Enter` or `Tab`, `Esc` | Select, apply, or close completion |
 | Skill menu | Type `$`, then `Up` / `Down`, `Enter` or `Tab`, `Esc` | Filter, insert, or close enabled skill mentions |

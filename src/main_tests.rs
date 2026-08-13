@@ -5,14 +5,22 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 use super::codex_home_from_home;
+use super::directory_is_empty_or_missing;
 use super::enter_terminal;
+use super::is_trash_path;
 use super::leave_terminal;
+use super::list_params;
 use super::permission_update_params;
 use super::resume_terminal_features;
 use super::split_args;
 use super::suspend_terminal_features;
+use super::thread_resume_params;
 use super::turn_start_params;
 use crate::ui::SubmissionInput;
+
+#[cfg(unix)]
+#[path = "main_transcript_tests.rs"]
+mod transcript_tests;
 
 #[test]
 fn terminal_lifecycle_enables_and_disables_bracketed_paste() {
@@ -118,6 +126,49 @@ fn default_codex_home_uses_the_standard_home_directory() {
         codex_home_from_home(PathBuf::from("/users/example")),
         PathBuf::from("/users/example/.codex")
     );
+}
+
+#[test]
+fn recovery_list_omits_cwd_and_keeps_pagination_cursor() {
+    assert_eq!(
+        list_params(None, Some("page-2")),
+        json!({
+            "limit": 200,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "sourceKinds": super::SOURCE_KINDS,
+            "archived": false,
+            "cursor": "page-2"
+        })
+    );
+}
+
+#[test]
+fn recovery_resume_always_carries_the_selected_cwd() {
+    assert_eq!(
+        thread_resume_params("thread-7", std::path::Path::new("/work/current")),
+        json!({"threadId": "thread-7", "cwd": "/work/current"})
+    );
+}
+
+#[test]
+fn trash_detection_is_component_based() {
+    assert!(is_trash_path(std::path::Path::new(
+        "/home/user/.local/share/Trash/files/project"
+    )));
+    assert!(!is_trash_path(std::path::Path::new(
+        "/home/user/work/trash-tools/project"
+    )));
+    assert!(is_trash_path(std::path::Path::new(
+        "/Users/user/.Trash/project"
+    )));
+}
+
+#[test]
+fn missing_codex_home_is_reported_as_empty() {
+    assert!(directory_is_empty_or_missing(std::path::Path::new(
+        "/path/that/does/not/exist/codex-home"
+    )));
 }
 
 #[test]

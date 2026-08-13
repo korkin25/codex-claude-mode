@@ -116,7 +116,7 @@ pub(crate) enum Action {
     SelectionChanged,
     ResolvePrompt(PromptResolution),
     Interrupt,
-    SessionSelected(Option<String>),
+    SessionSelected(Option<SessionSelection>),
     ChooseSession,
     NewSession,
     UpdateCodex,
@@ -139,6 +139,13 @@ pub(crate) enum Action {
         target_id: String,
         profile_id: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionSelection {
+    pub(crate) id: String,
+    pub(crate) use_saved_cwd: bool,
+    pub(crate) saved_cwd: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,12 +253,14 @@ pub(crate) struct Workspace {
     skill_popup: Option<SkillPopup>,
     skill_bindings: Vec<SkillBinding>,
     backend_user_agent: Option<String>,
+    codex_home: Option<(PathBuf, bool)>,
     codex_current_version: Option<String>,
     codex_latest_version: Option<String>,
     codex_update_confirm: bool,
     codex_update_running: bool,
     codex_update_result: Option<String>,
     pub(crate) prompt: Option<ServerPrompt>,
+    prompt_log_scroll: Option<u16>,
     prompt_draft: Option<String>,
     prompt_draft_cursor: Option<usize>,
     prompt_draft_skill_bindings: Vec<SkillBinding>,
@@ -302,12 +311,14 @@ impl Workspace {
             skill_popup: None,
             skill_bindings: Vec::new(),
             backend_user_agent: None,
+            codex_home: None,
             codex_current_version: None,
             codex_latest_version: None,
             codex_update_confirm: false,
             codex_update_running: false,
             codex_update_result: None,
             prompt: None,
+            prompt_log_scroll: None,
             prompt_draft: None,
             prompt_draft_cursor: None,
             prompt_draft_skill_bindings: Vec::new(),
@@ -441,6 +452,10 @@ impl Workspace {
         self.backend_user_agent = (!user_agent.trim().is_empty()).then(|| user_agent.to_string());
     }
 
+    pub(crate) fn set_codex_home(&mut self, path: PathBuf, was_empty: bool) {
+        self.codex_home = Some((path, was_empty));
+    }
+
     fn scroll_log_up(&mut self, amount: u16) {
         self.scroll = self.scroll.min(self.last_max_scroll).saturating_sub(amount);
     }
@@ -522,12 +537,10 @@ impl Workspace {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Action {
-        if matches!(key.code, KeyCode::Char('i' | 'I'))
-            && (key.modifiers == KeyModifiers::ALT
-                || key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT)
-        {
-            return Action::PasteImage;
-        }
+        let requests_clipboard = key.code == KeyCode::F(6)
+            || (matches!(key.code, KeyCode::Char('i' | 'I'))
+                && (key.modifiers == KeyModifiers::ALT
+                    || key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT));
         self.composer_generation = self.composer_generation.wrapping_add(1);
         self.overlay_epoch = self.overlay_epoch.wrapping_add(1);
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
@@ -543,6 +556,9 @@ impl Workspace {
             return Action::None;
         }
         self.quit_armed = false;
+        if requests_clipboard && self.clipboard_target().is_some() {
+            return Action::PasteImage;
+        }
         if let Some(picker) = self.session_picker.as_mut() {
             if picker.starting_new {
                 return Action::None;
@@ -559,9 +575,28 @@ impl Workspace {
                         picker
                             .candidates
                             .get(index)
-                            .map(|candidate| candidate.id.clone())
+                            .map(|candidate| SessionSelection {
+                                id: candidate.id.clone(),
+                                use_saved_cwd: true,
+                                saved_cwd: candidate.cwd.clone(),
+                            })
                     });
                     return Action::SessionSelected(selected);
+                }
+                KeyCode::Char('c') => {
+                    let selected = picker.selected.checked_sub(1).and_then(|index| {
+                        picker
+                            .candidates
+                            .get(index)
+                            .map(|candidate| SessionSelection {
+                                id: candidate.id.clone(),
+                                use_saved_cwd: false,
+                                saved_cwd: candidate.cwd.clone(),
+                            })
+                    });
+                    if selected.is_some() {
+                        return Action::SessionSelected(selected);
+                    }
                 }
                 _ => {}
             }
@@ -981,7 +1016,11 @@ impl Workspace {
                     picker
                         .candidates
                         .get(candidate_index)
-                        .map(|candidate| candidate.id.clone())
+                        .map(|candidate| SessionSelection {
+                            id: candidate.id.clone(),
+                            use_saved_cwd: true,
+                            saved_cwd: candidate.cwd.clone(),
+                        })
                 });
                 return Action::SessionSelected(selected);
             }
@@ -1496,6 +1535,17 @@ impl Workspace {
             )),
             format!("Codex backend: {backend}").into(),
         ];
+        if let Some((codex_home, was_empty)) = &self.codex_home {
+            lines.push(format!("CODEX_HOME: {}", codex_home.display()).into());
+            if *was_empty {
+                lines.push(
+                    "Warning: CODEX_HOME was new or empty at startup"
+                        .yellow()
+                        .bold()
+                        .into(),
+                );
+            }
+        }
         if update_available {
             lines.push("Update available · U update".red().bold().into());
         }
@@ -1606,7 +1656,7 @@ impl Workspace {
             .border_style(Style::default().fg(ACCENT_CYAN))
             .style(Style::default().bg(APP_BACKGROUND))
             .title(" Choose session ")
-            .title_bottom(" ↑/↓ select · Enter open ");
+            .title_bottom(" ↑/↓ select · Enter saved cwd · c current cwd ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.session_hitboxes.clear();
@@ -1632,10 +1682,15 @@ impl Workspace {
                     };
                     (
                         format!(
-                            "Continue · {} · {} · {}",
+                            "Continue · {} · {} · {} · {}",
                             preview,
                             relative_time(candidate.updated_at),
-                            short_id(&candidate.id)
+                            short_id(&candidate.id),
+                            if candidate.cwd.is_empty() {
+                                "(unknown cwd)"
+                            } else {
+                                &candidate.cwd
+                            }
                         ),
                         index + 1,
                     )
@@ -1793,6 +1848,7 @@ impl Workspace {
         self.suspended_permission_picker = self.permission_picker.take();
         self.patch_open = false;
         self.slash_selected = 0;
+        self.prompt_log_scroll = Some(self.scroll);
         self.scroll = 0;
         self.prompt = Some(prompt);
         Ok(())
@@ -2060,6 +2116,7 @@ impl Workspace {
         self.bump_overlay_epoch();
         self.prompt = None;
         self.patch_open = false;
+        self.scroll = self.prompt_log_scroll.take().unwrap_or(u16::MAX);
         self.input = self.prompt_draft.take().unwrap_or_default();
         self.input_cursor = self.prompt_draft_cursor.take();
         self.skill_bindings = std::mem::take(&mut self.prompt_draft_skill_bindings);
@@ -2224,7 +2281,7 @@ fn centered_session_area(outer: Rect, candidate_count: usize) -> Rect {
 
 fn centered_info_area(outer: Rect) -> Rect {
     let width = outer.width.saturating_sub(2).clamp(1, 100);
-    let height = outer.height.saturating_sub(2).clamp(1, 14);
+    let height = outer.height.saturating_sub(2).clamp(1, 18);
     Rect::new(
         outer.x + outer.width.saturating_sub(width) / 2,
         outer.y + outer.height.saturating_sub(height) / 2,
