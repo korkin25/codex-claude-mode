@@ -46,6 +46,7 @@ fn session_picker_defaults_to_new_and_can_continue_existing_session() {
         id: "01900000-existing".to_string(),
         preview: "previous task".to_string(),
         updated_at: 1,
+        cwd: "/work/previous".to_string(),
     }]);
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -79,7 +80,10 @@ fn session_picker_defaults_to_new_and_can_continue_existing_session() {
     workspace.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert!(matches!(
         workspace.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        Action::SessionSelected(Some(id)) if id == "01900000-existing"
+        Action::SessionSelected(Some(selection))
+            if selection.id == "01900000-existing"
+                && selection.use_saved_cwd
+                && selection.saved_cwd == "/work/previous"
     ));
 }
 
@@ -759,6 +763,7 @@ fn navigation_i_opens_agent_info_without_editing() {
     workspace.threads.insert(thread.id.clone(), thread);
     workspace.rebuild_tree(Some("agent-id"));
     workspace.set_backend_user_agent("codex-cli/1.2.3");
+    workspace.set_codex_home(PathBuf::from("/tmp/codex-home"), true);
     workspace.set_codex_versions(Some("1.2.3".to_string()), Some("1.3.0".to_string()));
     workspace.mode = Mode::Navigation;
 
@@ -767,7 +772,7 @@ fn navigation_i_opens_agent_info_without_editing() {
     assert_eq!(workspace.mode, Mode::Navigation);
     assert!(workspace.input.is_empty());
 
-    let backend = TestBackend::new(100, 20);
+    let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
         .draw(|frame| workspace.render(frame))
@@ -785,6 +790,8 @@ fn navigation_i_opens_agent_info_without_editing() {
     assert!(contents.contains("Session / agent info"));
     assert!(contents.contains("Codex backend: codex-cli/1.2.3"));
     assert!(contents.contains("Codex version: 1.2.3 (latest: 1.3.0)"));
+    assert!(contents.contains("CODEX_HOME: /tmp/codex-home"));
+    assert!(contents.contains("was new or empty"));
     assert!(contents.contains("Update available"));
     assert!(contents.contains("session-id"));
     assert!(contents.contains("agent-id"));
@@ -966,6 +973,68 @@ fn alt_i_requests_an_image_paste_without_inserting_text() {
         Action::PasteImage
     ));
     assert!(workspace.input.is_empty());
+}
+
+#[test]
+fn f6_requests_clipboard_paste_when_terminal_consumes_alt_i() {
+    let mut workspace = Workspace::new();
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+        Action::PasteImage
+    ));
+    assert!(workspace.input.is_empty());
+}
+
+#[test]
+fn clipboard_shortcuts_do_not_bypass_session_or_info_overlays() {
+    let mut workspace = Workspace::new();
+    workspace.show_session_picker(Vec::new());
+
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+        Action::None
+    ));
+    assert!(workspace.session_picker.is_some());
+
+    workspace.clear_session_picker();
+    workspace.info_open = true;
+    assert!(matches!(
+        workspace.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+        Action::None
+    ));
+    assert!(workspace.info_open);
+}
+
+#[test]
+fn clipboard_shortcuts_do_not_bypass_action_required_prompt() {
+    let mut workspace = Workspace::new();
+    workspace
+        .set_prompt(
+            ServerPrompt::from_request_with_item(
+                &json!({
+                    "id": 91,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "threadId": "main",
+                        "turnId": "turn",
+                        "command": "true",
+                        "availableDecisions": ["accept", "cancel"]
+                    }
+                }),
+                None,
+            )
+            .expect("valid approval"),
+        )
+        .expect("no existing prompt");
+
+    for key in [
+        KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
+    ] {
+        assert!(matches!(workspace.handle_key(key), Action::None));
+    }
+    assert!(workspace.prompt.is_some());
 }
 
 #[test]
@@ -1445,6 +1514,64 @@ fn approval_prompt_replaces_log_with_explicit_decisions() {
         Action::ResolvePrompt(_)
     ));
     assert_eq!(workspace.input, "unfinished message to selected agent");
+}
+
+#[test]
+fn closing_prompt_restores_log_tail_follow_mode() {
+    let mut workspace = Workspace::new();
+    workspace.scroll = u16::MAX;
+    workspace
+        .set_prompt(
+            ServerPrompt::from_request_with_item(
+                &json!({
+                    "id": 107,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "threadId": "main",
+                        "turnId": "turn",
+                        "command": "true",
+                        "cwd": "/tmp/project",
+                        "availableDecisions": ["accept", "cancel"]
+                    }
+                }),
+                None,
+            )
+            .expect("valid approval"),
+        )
+        .expect("no existing prompt");
+
+    workspace.clear_prompt(&json!(107));
+
+    assert_eq!(workspace.scroll, u16::MAX);
+}
+
+#[test]
+fn closing_prompt_restores_manual_log_scroll_position() {
+    let mut workspace = Workspace::new();
+    workspace.scroll = 23;
+    workspace
+        .set_prompt(
+            ServerPrompt::from_request_with_item(
+                &json!({
+                    "id": 108,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "threadId": "main",
+                        "turnId": "turn",
+                        "command": "true",
+                        "cwd": "/tmp/project",
+                        "availableDecisions": ["accept", "cancel"]
+                    }
+                }),
+                None,
+            )
+            .expect("valid approval"),
+        )
+        .expect("no existing prompt");
+
+    workspace.clear_prompt(&json!(108));
+
+    assert_eq!(workspace.scroll, 23);
 }
 
 #[test]

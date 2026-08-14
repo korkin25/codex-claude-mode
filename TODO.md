@@ -81,6 +81,23 @@ evidence релиза.
 - Evidence: pending.
 - Size: `M`
 
+### CCM-DIRECT-002 — Recover sessions safely across workspaces
+
+- Repo owner: `CCM`
+- Status: `done`
+- Phase: direct-mode compatibility patch `0.4.12`
+- Depends on: `CCM-BASE-004`
+- Outcome: explicit thread selection never falls back to creating a replacement;
+  recovery exposes saved workspace context, uses the chosen `cwd`, and loads all
+  bounded pages of roots and descendants. The TUI also exposes `CODEX_HOME`, a
+  terminal-safe clipboard shortcut, and preserves tail-follow after approvals.
+- Acceptance: transcript coverage proves direct `thread/resume`, no hidden
+  `thread/start`, current/saved/deleted/Trash workspace handling, interleaved and
+  greater-than-200 pagination, plus F6 modal priority and approval tail-follow.
+- Evidence: Rust 1.95: 142 unit/integration tests and 5 CLI tests (147 total); `cargo fmt
+  --check`, Clippy with warnings denied, and release build passed before commit.
+- Size: `M`
+
 ### SHARED-PLATFORM-001 — Establish the Linux/macOS baseline matrix
 
 - Repo owner: `SHARED`

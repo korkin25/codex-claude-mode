@@ -7,6 +7,7 @@ pub(crate) struct SessionCandidate {
     pub(crate) id: String,
     pub(crate) preview: String,
     pub(crate) updated_at: i64,
+    pub(crate) cwd: String,
 }
 
 pub(crate) fn candidates_from_list(result: &Value) -> Vec<SessionCandidate> {
@@ -31,6 +32,11 @@ pub(crate) fn candidates_from_list(result: &Value) -> Vec<SessionCandidate> {
                     .get("updatedAt")
                     .and_then(Value::as_i64)
                     .unwrap_or_default(),
+                cwd: thread
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect::<Vec<_>>();

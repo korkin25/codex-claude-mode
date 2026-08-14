@@ -20,11 +20,13 @@ fn extracts_only_root_sessions_newest_first() {
                 id: "new".to_string(),
                 preview: "newer work".to_string(),
                 updated_at: 20,
+                cwd: String::new(),
             },
             SessionCandidate {
                 id: "old".to_string(),
                 preview: "older work".to_string(),
                 updated_at: 10,
+                cwd: String::new(),
             }
         ]
     );
