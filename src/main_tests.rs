@@ -16,6 +16,7 @@ use super::split_args;
 use super::suspend_terminal_features;
 use super::thread_resume_params;
 use super::turn_start_params;
+use super::validated_resume_cwd;
 use crate::ui::SubmissionInput;
 
 #[cfg(unix)]
@@ -156,12 +157,43 @@ fn trash_detection_is_component_based() {
     assert!(is_trash_path(std::path::Path::new(
         "/home/user/.local/share/Trash/files/project"
     )));
+    assert!(is_trash_path(std::path::Path::new(
+        "/custom-xdg-data/Trash/files/project"
+    )));
     assert!(!is_trash_path(std::path::Path::new(
         "/home/user/work/trash-tools/project"
+    )));
+    assert!(!is_trash_path(std::path::Path::new(
+        "/home/user/work/trash/project"
+    )));
+    assert!(!is_trash_path(std::path::Path::new(
+        "/home/user/work/.trash-tools/project"
     )));
     assert!(is_trash_path(std::path::Path::new(
         "/Users/user/.Trash/project"
     )));
+    assert!(!is_trash_path(std::path::Path::new(
+        "/work/Users/user/.Trash/project"
+    )));
+    assert!(is_trash_path(std::path::Path::new(
+        "/Volumes/External/.Trashes/501/project"
+    )));
+    assert!(is_trash_path(std::path::Path::new(
+        "/media/disk/.Trash-1000/files/project"
+    )));
+    assert!(is_trash_path(std::path::Path::new(
+        "/media/disk/.Trash/1000/files/project"
+    )));
+}
+
+#[test]
+fn resume_cwd_validation_rejects_missing_paths() {
+    assert_eq!(
+        validated_resume_cwd(std::path::Path::new(
+            "/path/that/does/not/exist/resume-workspace"
+        )),
+        Err("is missing or is not a directory")
+    );
 }
 
 #[test]

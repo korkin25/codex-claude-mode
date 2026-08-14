@@ -738,14 +738,23 @@ impl App {
                 );
                 self.request_skills(false, false)?;
                 if let Some(thread_id) = self.preferred_root.clone() {
-                    let id = self
-                        .backend
-                        .request("thread/resume", thread_resume_params(&thread_id, &self.cwd))?;
+                    let resume_cwd = match validated_resume_cwd(&self.cwd) {
+                        Ok(cwd) => cwd,
+                        Err(error) => {
+                            self.workspace.status_line =
+                                format!("cannot open thread {thread_id}: {error}");
+                            return Ok(());
+                        }
+                    };
+                    let id = self.backend.request(
+                        "thread/resume",
+                        thread_resume_params(&thread_id, &resume_cwd),
+                    )?;
                     self.pending.insert(
                         id,
                         Pending::OpenThread {
                             thread_id,
-                            resume_cwd: self.cwd.clone(),
+                            resume_cwd,
                         },
                     );
                 } else {
@@ -929,25 +938,24 @@ impl App {
         self.session_decided = true;
         if let Some(selection) = selection {
             let root_id = selection.id;
-            let resume_cwd = if selection.use_saved_cwd {
-                let saved = PathBuf::from(&selection.saved_cwd);
-                if selection.saved_cwd.is_empty() || !saved.is_dir() {
-                    self.session_decided = false;
-                    self.workspace.status_line =
-                        "saved workspace is missing; press c to resume in the current directory"
-                            .to_string();
-                    return Ok(());
-                }
-                if is_trash_path(&saved) {
-                    self.session_decided = false;
-                    self.workspace.status_line =
-                        "saved workspace is in Trash; press c to resume in the current directory"
-                            .to_string();
-                    return Ok(());
-                }
-                saved
+            let candidate = if selection.use_saved_cwd {
+                PathBuf::from(&selection.saved_cwd)
             } else {
                 self.cwd.clone()
+            };
+            let resume_cwd = match validated_resume_cwd(&candidate) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    self.session_decided = false;
+                    self.workspace.status_line = if selection.use_saved_cwd {
+                        format!(
+                            "saved workspace {error}; choose c only from a safe current directory"
+                        )
+                    } else {
+                        format!("current workspace {error}; restart from a safe existing directory")
+                    };
+                    return Ok(());
+                }
             };
             self.workspace.clear_session_picker();
             self.starting_new_session = false;
@@ -1190,9 +1198,17 @@ impl App {
         if can_send {
             self.start_turn(&target_id, &submission.input)
         } else {
+            let resume_cwd = match validated_resume_cwd(&self.active_session_cwd) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    self.workspace.status_line =
+                        format!("cannot resume {target_id}: workspace {error}");
+                    return Ok(());
+                }
+            };
             let id = self.backend.request(
                 "thread/resume",
-                thread_resume_params(&target_id, &self.active_session_cwd),
+                thread_resume_params(&target_id, &resume_cwd),
             )?;
             self.pending.insert(
                 id,
@@ -1642,12 +1658,47 @@ fn thread_resume_params(thread_id: &str, cwd: &std::path::Path) -> Value {
     json!({"threadId": thread_id, "cwd": cwd.to_string_lossy()})
 }
 
+fn validated_resume_cwd(path: &std::path::Path) -> std::result::Result<PathBuf, &'static str> {
+    if !path.is_dir() {
+        return Err("is missing or is not a directory");
+    }
+    if is_trash_path(path) {
+        return Err("is inside Trash");
+    }
+    Ok(path.to_path_buf())
+}
+
 fn is_trash_path(path: &std::path::Path) -> bool {
-    path.components().any(|component| {
-        let component = component.as_os_str().to_string_lossy();
-        component.eq_ignore_ascii_case("trash")
-            || component.to_ascii_lowercase().starts_with(".trash")
-    })
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    components
+        .windows(2)
+        .any(|window| window[0] == "Trash" && window[1] == "files")
+        || components.windows(3).any(|window| {
+            (window[0] == ".Trash"
+                && !window[1].is_empty()
+                && window[1]
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+                && window[2] == "files")
+                || (window[0] == ".Trashes"
+                    && !window[1].is_empty()
+                    && window[1]
+                        .chars()
+                        .all(|character| character.is_ascii_digit()))
+        })
+        || components.windows(2).any(|window| {
+            window[0].strip_prefix(".Trash-").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+            }) && window[1] == "files"
+        })
+        || (components.first().is_some_and(|root| root == "/")
+            && components.get(1).is_some_and(|users| users == "Users")
+            && components.get(2).is_some_and(|user| !user.is_empty())
+            && components.get(3).is_some_and(|trash| trash == ".Trash"))
 }
 
 fn directory_is_empty_or_missing(path: &std::path::Path) -> bool {

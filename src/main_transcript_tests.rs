@@ -155,8 +155,10 @@ fn thread_value(id: &str, cwd: &Path) -> Value {
 
 #[test]
 fn explicit_thread_resumes_directly_with_current_cwd_and_never_lists_or_starts() {
-    let cwd = Path::new("/work/current");
-    let mut harness = Harness::new(cwd, Some("known"));
+    let current = TestDir::new();
+    let cwd = current.0.join("current");
+    fs::create_dir(&cwd).expect("create current cwd");
+    let mut harness = Harness::new(&cwd, Some("known"));
 
     harness
         .app
@@ -184,6 +186,39 @@ fn explicit_thread_resumes_directly_with_current_cwd_and_never_lists_or_starts()
             .iter()
             .any(|method| method == "thread/start")
     );
+}
+
+#[test]
+fn explicit_thread_rejects_missing_or_trash_current_cwd_without_resuming() {
+    let current = TestDir::new();
+    let missing = current.0.join("deleted");
+    let trash = current.0.join(".local/share/Trash/files/project");
+    fs::create_dir_all(&trash).expect("create Trash cwd");
+
+    for cwd in [missing, trash] {
+        let mut harness = Harness::new(&cwd, Some("known"));
+        harness
+            .app
+            .handle_response(
+                Pending::Initialize,
+                &json!({"result": {"userAgent": "fake"}}),
+            )
+            .expect("handle initialize");
+
+        assert!(!harness.methods().iter().any(|method| {
+            matches!(
+                method.as_str(),
+                "thread/resume" | "thread/list" | "thread/start"
+            )
+        }));
+        assert!(
+            harness
+                .app
+                .workspace
+                .status_line
+                .contains("cannot open thread known")
+        );
+    }
 }
 
 #[test]
@@ -499,8 +534,10 @@ fn repeated_cursor_and_descendant_bounds_fail_explicitly() {
 
 #[test]
 fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths() {
-    let cwd = Path::new("/work/current");
-    let mut harness = Harness::new(cwd, None);
+    let current_dir = TestDir::new();
+    let cwd = current_dir.0.join("current");
+    fs::create_dir(&cwd).expect("create current cwd");
+    let mut harness = Harness::new(&cwd, None);
     let saved = harness._directory.0.join("saved");
     fs::create_dir(&saved).expect("create saved cwd");
     harness
@@ -515,7 +552,7 @@ fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths()
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(saved)
     }));
 
-    let mut current = Harness::new(cwd, None);
+    let mut current = Harness::new(&cwd, None);
     current
         .app
         .select_session(Some(SessionSelection {
@@ -528,10 +565,13 @@ fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths()
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(cwd)
     }));
 
-    let trash = harness._directory.0.join("Trash/files/project");
+    let trash = harness
+        ._directory
+        .0
+        .join(".local/share/Trash/files/project");
     fs::create_dir_all(&trash).expect("create Trash cwd");
     for unsafe_path in [PathBuf::from("/definitely/missing"), trash] {
-        let mut unsafe_harness = Harness::new(cwd, None);
+        let mut unsafe_harness = Harness::new(&cwd, None);
         unsafe_harness
             .app
             .select_session(Some(SessionSelection {
@@ -557,6 +597,41 @@ fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths()
 }
 
 #[test]
+fn recovery_current_choice_rejects_deleted_or_trash_current_cwd() {
+    let directory = TestDir::new();
+    let missing = directory.0.join("deleted");
+    let trash = directory.0.join(".local/share/Trash/files/project");
+    fs::create_dir_all(&trash).expect("create Trash cwd");
+
+    for cwd in [missing, trash] {
+        let mut harness = Harness::new(&cwd, None);
+        harness
+            .app
+            .select_session(Some(SessionSelection {
+                id: "unsafe-current".to_string(),
+                saved_cwd: "/old/path".to_string(),
+                use_saved_cwd: false,
+            }))
+            .expect("reject unsafe current cwd");
+
+        assert!(
+            !harness
+                .methods()
+                .iter()
+                .any(|method| method == "thread/resume")
+        );
+        assert!(
+            harness
+                .app
+                .workspace
+                .status_line
+                .contains("current workspace")
+        );
+        assert!(!harness.app.session_decided);
+    }
+}
+
+#[test]
 fn selected_saved_cwd_is_used_when_resume_and_send_is_needed_later() {
     let cwd = Path::new("/work/current");
     let mut harness = Harness::new(cwd, None);
@@ -577,4 +652,41 @@ fn selected_saved_cwd_is_used_when_resume_and_send_is_needed_later() {
     assert!(harness.requests().iter().any(|request| {
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(saved)
     }));
+}
+
+#[test]
+fn resume_before_send_revalidates_a_deleted_or_trash_workspace() {
+    let directory = TestDir::new();
+    let deleted = directory.0.join("deleted");
+    let trash = directory.0.join(".local/share/Trash/files/project");
+    fs::create_dir_all(&trash).expect("create Trash cwd");
+
+    for cwd in [deleted, trash] {
+        let mut harness = Harness::new(&directory.0, None);
+        harness.app.active_session_cwd = cwd.clone();
+        harness.app.upsert_thread(&thread_value("root", &cwd));
+        harness.app.workspace.rebuild_tree(Some("root"));
+
+        harness
+            .app
+            .submit(Submission {
+                displayed_text: "continue".to_string(),
+                input: vec![SubmissionInput::Text("continue".to_string())],
+            })
+            .expect("reject unsafe resume before send");
+
+        assert!(
+            !harness
+                .methods()
+                .iter()
+                .any(|method| method == "thread/resume")
+        );
+        assert!(
+            harness
+                .app
+                .workspace
+                .status_line
+                .contains("cannot resume root")
+        );
+    }
 }

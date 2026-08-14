@@ -94,7 +94,7 @@ evidence релиза.
 - Acceptance: transcript coverage proves direct `thread/resume`, no hidden
   `thread/start`, current/saved/deleted/Trash workspace handling, interleaved and
   greater-than-200 pagination, plus F6 modal priority and approval tail-follow.
-- Evidence: Rust 1.95: 138 unit/integration tests and 5 CLI tests (143 total); `cargo fmt
+- Evidence: Rust 1.95: 142 unit/integration tests and 5 CLI tests (147 total); `cargo fmt
   --check`, Clippy with warnings denied, and release build passed before commit.
 - Size: `M`
 
