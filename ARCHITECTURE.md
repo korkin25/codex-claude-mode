@@ -1,16 +1,9 @@
 # Architecture
 
-`codex-claude-mode` is currently an independent local frontend for installed
-Codex versions. Its implemented compatibility boundary is the public Codex
-`app-server` JSON-RPC protocol. It must not link to Codex internal Rust crates
-or modify the installed Codex executable.
-
-The accepted multi-provider direction keeps `agent-orchestrator` as the single
-authoritative writer for Task/Run state, dependencies, journal, policy and
-recovery. `codex-claude-mode` remains an operator client with ephemeral UI
-state. The first integration slice is a read-only, versioned JSONL stdio bridge;
-it is planned, not implemented. See [ROADMAP.md](ROADMAP.md) for gates and
-[MULTI_AGENT_SPEC.md](MULTI_AGENT_SPEC.md) for requirements.
+`codex-claude-mode` is a local frontend for installed Codex versions. Its
+compatibility boundary is the public Codex `app-server` JSON-RPC protocol. It
+must not link to Codex internal Rust crates or modify the installed Codex
+executable.
 
 ## Components
 
@@ -18,80 +11,56 @@ it is planned, not implemented. See [ROADMAP.md](ROADMAP.md) for gates and
 codex-claude-mode TUI (implemented direct mode)
         │
         └── installed Codex app-server + local CODEX_HOME
-
-planned read-only first slice:
-
-codex-claude-mode TUI ── versioned JSONL stdio ── agent-orchestrator
-                                                    │
-                                             provider adapters
 ```
 
-- The implemented client renders session and agent trees, logs, metrics,
-  approvals and a composer while connected directly to a local app-server.
-- The planned read-only bridge observes authoritative orchestrator projections
-  without moving launch, cancel or approval actions off the existing direct
-  path. Live capabilities move individually only after their roadmap gates.
-- A future provider adapter/sidecar may supervise installed provider processes;
-  this responsibility does not belong to the TUI once that migration occurs.
-- Codex authentication remains local to the host and its `CODEX_HOME`. OpenAI
-  access tokens are never uploaded to or reused by the cloud service.
+The client renders session and agent trees, logs, metrics, approvals and a
+composer while connected directly to a local app-server. It spawns the
+app-server as a child process and owns that connection for its lifetime.
 
-No second broker, scheduler or authoritative database is added to the Rust
-client.
+Codex authentication remains local to the host and its `CODEX_HOME`. This
+project does not provide separate authentication and never copies OpenAI access
+tokens anywhere.
 
-## Future remote identity and authorization
+## Planned split: `serve` and `ctl`
 
-This section is a non-MVP design candidate, not an implemented topology or an
-accepted deployment commitment. The first remote experiment, if approved by a
-separate ADR, is SSH stdio using the same local envelopes and replay cursor.
-OAuth/OIDC, a cloud relay and mTLS/WebSocket remain later options and must not
-be inferred from the local architecture.
+The single-process design ties every session to the lifetime of one terminal.
+The planned change separates state ownership from rendering:
 
-User identity and Codex provider identity are different security domains.
-Users should sign in to the cloud service through OAuth 2.1/OIDC (for example,
-an enterprise IdP or GitHub). This determines who may use the service; it does
-not grant access to OpenAI or to a host.
+```text
+installed Codex app-server
+        │
+codex-claude-mode serve        headless: owns the app-server connection,
+        │                      keeps the projection, exposes a local
+        │                      Unix domain socket (mode 0600)
+        ├── codex-claude-mode  TUI client (`--direct` keeps today's behavior)
+        └── codex-claude-mode ctl --json
+```
 
-A host is enrolled once with a short-lived device code. The host-agent then
-creates its own key pair and exchanges the enrollment grant for a renewable,
-short-lived workload credential. Production transport should use mutually
-authenticated TLS. Revocation, rotation, expiry, and an immutable host ID are
-required; long-lived bearer tokens in configuration files are not.
+`serve` is the only writer to the app-server connection, so the TUI and any
+`ctl` client observe the same sessions. The socket is filesystem-scoped to the
+invoking user under `$XDG_RUNTIME_DIR`; nothing binds to a network interface.
 
-Authorization is the intersection of cloud policy and host-local policy:
+A later optional step connects `serve` to `codex app-server daemon` instead of
+spawning its own child, so agents survive a `serve` restart. That path requires
+`codex app-server daemon enable-remote-control` and is not required for the
+split above.
 
-- tenant and project membership decide which users can see a host;
-- the host owns an allowlist of workspace roots and named execution profiles;
-- each profile fixes maximum sandbox, approval, model, network, environment,
-  resource, and concurrency permissions;
-- a remote request may only reduce a profile's permissions, never expand them;
-- every accepted job receives a signed, expiring ID with replay protection and
-  a complete audit record.
+## Remote operation
 
-The host-agent exposes typed operations such as `session.start`, `turn.send`,
-`turn.interrupt`, and `approval.resolve`. It does not expose generic process
-execution, filesystem access, environment mutation, or arbitrary Codex CLI
-arguments to the cloud.
+Remote access is not implemented by this project and no listener is provided.
+The supported arrangement is an agent framework running on the same host that
+invokes `ctl` locally; the transport to a phone or another machine belongs to
+that framework, not here.
 
-## Future remote session and data safety
+Any future remote path must keep these properties:
 
-The following are requirements for any future remote implementation; they do
-not claim that a cloud control plane or host-agent exists today.
-
-- Hosts make outbound connections; no inbound host port is required.
-- A Codex child receives an explicit cwd, `CODEX_HOME`, environment allowlist,
-  sandbox profile, and resource limits. Paths are canonicalized and must stay
-  inside an allowed root, including after symlink resolution.
-- Secrets stay on the host. Cloud payloads cannot provide secret-valued
-  environment variables; they can only reference locally configured aliases.
-- Event queues, individual items, and retained logs have hard size limits and
-  backpressure. Live app-server events are persisted locally before relay so a
-  reconnect cannot substitute a lossy `thread/read` history.
-- Cloud storage is tenant-scoped, encrypted, retention-limited, and audited.
-  Sensitive tool output requires an explicit retention policy; zero-retention
-  relay must be available.
-- Approval requests remain bound to the originating user, host, session, turn,
-  item, and expiry. A stale or replayed approval is rejected.
+- approvals bind to the approval ID, a digest of the original request, an
+  expiry and an idempotency key, so a stale, altered or replayed decision is
+  rejected;
+- read-only observation and mutating actions are separately authorized;
+- reconnect resumes from a monotonic cursor with bounded retention and
+  backpressure, and an expired cursor forces a fresh snapshot instead of a
+  guess.
 
 ## Compatibility boundary
 
@@ -102,7 +71,5 @@ suite against every supported installed Codex version. Unknown response fields
 are ignored; missing required fields fail closed with a useful compatibility
 report.
 
-The implemented direct transport is the Codex app-server child connection. The
-first planned orchestrator transport is read-only JSONL stdio; Unix sockets may
-follow only after shared fixtures pass. Any future host-agent/cloud protocol is
-separate and must not tunnel raw JSON-RPC without authorization and filtering.
+The implemented transport is the Codex app-server child connection. Unknown
+events and approval kinds fail closed rather than being guessed.
