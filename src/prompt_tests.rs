@@ -196,6 +196,141 @@ fn user_input_collects_all_questions() {
 }
 
 #[test]
+fn empty_form_elicitation_accepts_with_empty_content_by_key_or_default() {
+    let message = json!({
+        "id": "elicitation",
+        "method": "mcpServer/elicitation/request",
+        "params": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "serverName": "telegram",
+            "mode": "form",
+            "message": "Allow the telegram MCP server to run tool telegram_call?",
+            "requestedSchema": {"type": "object", "properties": {}}
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    assert!(
+        prompt
+            .decision_text()
+            .expect("decision text")
+            .contains("[y] accept")
+    );
+    let accepted_by_key = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("accept by key");
+    assert_eq!(
+        accepted_by_key.result,
+        json!({"action": "accept", "content": {}})
+    );
+
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    let accepted_by_default = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("accept by default");
+    assert_eq!(
+        accepted_by_default.result,
+        json!({"action": "accept", "content": {}})
+    );
+}
+
+#[test]
+fn nonempty_form_elicitation_stays_fail_closed() {
+    let message = json!({
+        "id": "elicitation",
+        "method": "mcpServer/elicitation/request",
+        "params": {
+            "threadId": "thread",
+            "serverName": "example",
+            "mode": "form",
+            "message": "Provide a value",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"]
+            }
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    assert!(
+        !prompt
+            .decision_text()
+            .expect("decision text")
+            .contains("[y] accept")
+    );
+    assert!(
+        prompt
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &mut String::new()
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn openai_form_elicitation_stays_fail_closed() {
+    let message = json!({
+        "id": "elicitation",
+        "method": "mcpServer/elicitation/request",
+        "params": {
+            "threadId": "thread",
+            "serverName": "example",
+            "mode": "openai/form",
+            "message": "Provide a value",
+            "requestedSchema": {"type": "object", "properties": {}}
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    assert!(
+        !prompt
+            .decision_text()
+            .expect("decision text")
+            .contains("[y] accept")
+    );
+    assert!(
+        prompt
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &mut String::new()
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn url_elicitation_still_accepts_with_null_content() {
+    let message = json!({
+        "id": "elicitation",
+        "method": "mcpServer/elicitation/request",
+        "params": {
+            "threadId": "thread",
+            "serverName": "example",
+            "mode": "url",
+            "message": "Open the authorization URL",
+            "url": "https://example.com/authorize"
+        }
+    });
+    let mut prompt = ServerPrompt::from_request_with_item(&message, None).expect("valid prompt");
+    let accepted = prompt
+        .handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut String::new(),
+        )
+        .expect("accept URL elicitation");
+    assert_eq!(
+        accepted.result,
+        json!({"action": "accept", "content": null})
+    );
+}
+
+#[test]
 fn control_c_cancels_prompt_and_interrupts_turn() {
     let message = json!({
         "id": 9,
