@@ -13,6 +13,7 @@ evidence.
 | `CCM-SKILL-001` | `planned` | `skills/` entry driving `ctl` for a host-local agent framework | `CCM-CTL-001` |
 | `CCM-DAEMON-001` | `planned` | Optionally connect `serve` to `codex app-server daemon` so agents survive a `serve` restart | `CCM-SERVE-001` |
 | `CCM-DIRECT-001` | `planned` | Split and verify the direct-Codex compatibility backlog: reconnect/resume, paginated history, multi-root selection, runtime schema probing | — |
+| `CCM-PROMPT-001` | `ready` | Fix empty form elicitation confirmation: `mode=form` currently suppresses the accept choice because only `mode=url` is marked directly acceptable | — |
 
 ## Acceptance notes
 
@@ -30,6 +31,11 @@ evidence.
   summary, and never answers an approval on its own.
 - `CCM-DAEMON-001` — requires `codex app-server daemon enable-remote-control`;
   falls back to a spawned child when the daemon is unavailable.
+- `CCM-PROMPT-001` — an empty-object standard form shows `[y] accept`; `y` and
+  the default Enter choice return `{"action":"accept","content":{}}`. URL
+  elicitation still accepts with null content, while non-empty standard forms
+  and `openai/form` remain fail-closed until the TUI can collect their fields.
+  Focused prompt tests cover every one of these cases.
 
 ## Rules
 

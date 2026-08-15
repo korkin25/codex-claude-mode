@@ -47,7 +47,7 @@ enum PromptKind {
     },
     Elicitation {
         details: String,
-        can_accept: bool,
+        accept_content: Option<Value>,
     },
 }
 
@@ -129,7 +129,11 @@ impl ServerPrompt {
                 );
                 PromptKind::Elicitation {
                     details,
-                    can_accept: mode == "url",
+                    accept_content: match mode.as_str() {
+                        "url" => Some(Value::Null),
+                        "form" if has_empty_form_schema(params) => Some(json!({})),
+                        _ => None,
+                    },
                 }
             }
             _ => return Err(format!("unsupported server request: {method}")),
@@ -208,8 +212,8 @@ impl ServerPrompt {
                 }),
             ),
             PromptKind::Permissions { .. } => (None, permission_choices(), None),
-            PromptKind::Elicitation { can_accept, .. } => {
-                (None, elicitation_choices(*can_accept), None)
+            PromptKind::Elicitation { accept_content, .. } => {
+                (None, elicitation_choices(accept_content.is_some()), None)
             }
             PromptKind::UserInput { .. } => return None,
         };
@@ -351,19 +355,27 @@ impl ServerPrompt {
                 }
                 _ => None,
             },
-            PromptKind::Elicitation { can_accept, .. } => match key.code {
-                KeyCode::Char('y') if *can_accept => {
-                    Some(json!({"action": "accept", "content": null}))
-                }
+            PromptKind::Elicitation { accept_content, .. } => match key.code {
+                KeyCode::Char('y') if accept_content.is_some() => Some(json!({
+                    "action": "accept",
+                    "content": accept_content.clone().expect("accept content checked above")
+                })),
                 KeyCode::Char('n') => Some(json!({"action": "decline", "content": null})),
                 KeyCode::Char('x') => Some(json!({"action": "cancel", "content": null})),
-                KeyCode::Enter if *can_accept && self.selected_decision == 0 => {
-                    Some(json!({"action": "accept", "content": null}))
+                KeyCode::Enter if accept_content.is_some() && self.selected_decision == 0 => {
+                    Some(json!({
+                        "action": "accept",
+                        "content": accept_content.clone().expect("accept content checked above")
+                    }))
                 }
-                KeyCode::Enter if self.selected_decision == usize::from(*can_accept) => {
+                KeyCode::Enter
+                    if self.selected_decision == usize::from(accept_content.is_some()) =>
+                {
                     Some(json!({"action": "decline", "content": null}))
                 }
-                KeyCode::Enter if self.selected_decision == usize::from(*can_accept) + 1 => {
+                KeyCode::Enter
+                    if self.selected_decision == usize::from(accept_content.is_some()) + 1 =>
+                {
                     Some(json!({"action": "cancel", "content": null}))
                 }
                 _ => None,
@@ -382,7 +394,9 @@ impl ServerPrompt {
                 decisions, scope, ..
             } => approval_choices(decisions, *scope),
             PromptKind::Permissions { .. } => permission_choices(),
-            PromptKind::Elicitation { can_accept, .. } => elicitation_choices(*can_accept),
+            PromptKind::Elicitation { accept_content, .. } => {
+                elicitation_choices(accept_content.is_some())
+            }
             PromptKind::UserInput { .. } => Vec::new(),
         }
     }
@@ -487,6 +501,24 @@ fn elicitation_choices(can_accept: bool) -> Vec<(&'static str, &'static str)> {
     choices.push(("decline", "[n] decline"));
     choices.push(("cancel", "[x] cancel"));
     choices
+}
+
+fn has_empty_form_schema(params: &Value) -> bool {
+    let Some(schema) = params.get("requestedSchema").and_then(Value::as_object) else {
+        return false;
+    };
+    let properties_are_empty = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty);
+    let required_is_empty = schema
+        .get("required")
+        .map(|required| required.as_array().is_some_and(Vec::is_empty))
+        .unwrap_or(true);
+
+    schema.get("type").and_then(Value::as_str) == Some("object")
+        && properties_are_empty
+        && required_is_empty
 }
 
 fn decisions(params: &Value, fallback: &[&str]) -> Vec<String> {
