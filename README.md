@@ -249,8 +249,8 @@ target/release/codex-claude-mode
   app does not silently try X11 `xclip`. Because `xclip` and `pngpaste` expose no
   portable type-query API, fallback to text recognizes only their known
   "type/image unavailable" diagnostics; other failures are reported as errors.
-- Multi-provider orchestration, a durable agent bus, and remote integrations are
-  roadmap items, not features in v0.4.11.
+- This project provides no remote access, network listener or account system.
+  It drives the Codex installation already present on the host.
 
 To update, repeat the verified release download with a newer version. To
 uninstall:
@@ -262,7 +262,6 @@ rm "$HOME/.local/bin/codex-claude-mode"
 ## More information
 
 - [Architecture and security boundaries](ARCHITECTURE.md)
-- [Multi-agent behavior specification](MULTI_AGENT_SPEC.md)
 - [Platform support and smoke checks](PLATFORM_SUPPORT.md)
 - [Roadmap](ROADMAP.md)
 - [Task status](TODO.md)

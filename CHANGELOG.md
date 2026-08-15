@@ -41,5 +41,5 @@
   syntax-highlighted file viewer and Vim/VS Code/Cursor launch actions.
 - Added pinned Rust 1.95 CI and release builds for Linux x86_64 and macOS ARM64.
 
-The multi-provider orchestrator, durable agent bus and remote integrations
+The headless `serve` process, the `ctl` client and the agent-framework skill
 described in the roadmap remain planned and are not part of this release.

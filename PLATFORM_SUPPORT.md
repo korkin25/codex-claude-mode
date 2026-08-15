@@ -1,8 +1,8 @@
 # Linux and macOS platform support
 
-Evidence and required validation for `SHARED-PLATFORM-001`, captured on
-2026-08-12. This matrix describes the current direct-Codex client. Planned
-orchestrator functionality is included only to define its future platform gate.
+Evidence and required validation captured on 2026-08-12. This matrix describes
+the current direct-Codex client. Linux x86_64 and macOS ARM64 are both
+first-class supported platforms.
 
 ## Evidence vocabulary
 
@@ -133,8 +133,8 @@ release; add Intel/ARM variants when releasing those artifacts.
 
 ## Gate decision
 
-This document completes the matrix-and-gaps planning acceptance of
-`SHARED-PLATFORM-001`; it does not establish macOS support or close `G0`.
+This document records the platform matrix and its known gaps; it does not by
+itself establish macOS support.
 Platform support becomes a release claim only after the mandatory jobs and
 smoke evidence exist and the degraded lifecycle/path items are either fixed or
 explicitly excluded from the release contract.
