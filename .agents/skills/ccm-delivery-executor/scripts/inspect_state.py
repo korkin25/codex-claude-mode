@@ -10,9 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
+import stat
 import subprocess
 import sys
-from typing import Any
+import time
+from typing import Any, NamedTuple
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -23,18 +26,23 @@ WORK_RE = re.compile(r"^CCM-[A-Z]+-[0-9]{3}$")
 PUBLIC_CAPABILITY_RE = re.compile(r"^ccm\.[a-z0-9]+(?:[.-][a-z0-9]+)*\.v[1-9][0-9]*$")
 REMOTE = "git@github.com:korkin25/codex-claude-mode.git"
 CONTROLLER_REMOTE = "git@github.com:korkin25/ccm-multi.git"
+GIT_CANDIDATES = (Path("/usr/bin/git"), Path("/bin/git"))
+EMPTY_HOOKS = Path("/usr/share/ccm-public-empty-git-hooks")
+GIT_TIMEOUT_SECONDS = 5.0
+GIT_OUTPUT_LIMIT = 4 * 1024 * 1024
 TOP_KEYS = {"document_type", "schema_version", "repository", "admission", "execution", "checkpoint"}
 REPOSITORY_KEYS = {"id", "remote", "default_branch"}
 ADMISSION_KEYS = {
     "controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor",
     "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha",
     "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence",
+    "acceptance_digest", "required_checks",
 }
 PREDECESSOR_KEYS = {"claim_id", "generation", "checkpoint_sha"}
 EVIDENCE_BINDING_KEYS = {"id", "digest"}
 EXECUTION_KEYS = {"phase", "completed_acceptance", "remaining_work", "completed_checks"}
 CHECKPOINT_KEYS = {"sequence", "kind", "parent_sha", "updated_at", "next_action"}
-CHECK_KEYS = {"command", "outcome"}
+CHECK_KEYS = {"name", "command", "outcome"}
 CLAIM_KEYS = {
     "id", "work_item_id", "owner_principal", "repository_id", "base_sha", "branch",
     "capabilities", "generation", "status", "issued_at", "expires_at",
@@ -57,6 +65,20 @@ PHASE_KIND = {
     "checkpointed": "planned_restart",
     "candidate": "candidate",
     "blocked": "blocked",
+}
+REPOSITORY_WEB = {
+    "ccm-public": "https://github.com/korkin25/codex-claude-mode",
+    "ccm-multi": "https://github.com/korkin25/ccm-multi",
+    "aor": "https://github.com/korkin25/agent-orchestrator",
+}
+NORMATIVE_CHECKS = {
+    "ccm-public": {"Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"},
+    "ccm-multi": {"Delivery governance", "Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"},
+    "aor": {"capability-governance (ubuntu-latest)", "capability-governance (macos-latest)"},
+}
+CHECK_CONTRACT = {
+    "ccm-public": ("delivery/capabilities.json", "ccm-capability-manifest-v1"),
+    "aor": (".delivery/capabilities.json", "aor-capability-manifest-v1"),
 }
 
 
@@ -209,6 +231,8 @@ def validate_state(state: dict[str, Any]) -> list[str]:
             if evidence_id: binding_ids.append(evidence_id)
     if len(binding_ids) != len(set(binding_ids)): errors.append("DUPLICATE admission.dependency_evidence")
     if set(binding_ids) != set(refs): errors.append("DEPENDENCY_EVIDENCE_BINDING_SET_MISMATCH")
+    text(admission.get("acceptance_digest"), "admission.acceptance_digest", errors, DIGEST_RE)
+    string_list(admission.get("required_checks"), "admission.required_checks", errors, nonempty=True)
 
     execution = strict_object(state.get("execution"), EXECUTION_KEYS, "execution", errors)
     phase = execution.get("phase")
@@ -221,6 +245,7 @@ def validate_state(state: dict[str, Any]) -> list[str]:
         checks = []
     for index, raw_check in enumerate(checks):
         check = strict_object(raw_check, CHECK_KEYS, f"execution.completed_checks[{index}]", errors)
+        text(check.get("name"), f"execution.completed_checks[{index}].name", errors)
         text(check.get("command"), f"execution.completed_checks[{index}].command", errors)
         if check.get("outcome") not in {"passed", "failed"}: errors.append(f"FORMAT execution.completed_checks[{index}].outcome")
 
@@ -240,36 +265,160 @@ def validate_state(state: dict[str, Any]) -> list[str]:
     return errors
 
 
+class GitProbeError(RuntimeError):
+    pass
+
+
+class GitResult(NamedTuple):
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+def trusted_git() -> Path:
+    effective_uid = os.geteuid()
+    for candidate in GIT_CANDIDATES:
+        try:
+            resolved = candidate.resolve(strict=True)
+            nodes = [resolved, *resolved.parents]
+            metadata = [node.lstat() for node in nodes]
+        except OSError:
+            continue
+        owner = metadata[0].st_uid
+        if owner == effective_uid or not stat.S_ISREG(metadata[0].st_mode) or not metadata[0].st_mode & 0o111:
+            continue
+        if all(item.st_uid == owner and not item.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                   and (index == 0 or stat.S_ISDIR(item.st_mode)) for index, item in enumerate(metadata)):
+            return resolved
+    raise GitProbeError("TRUSTED_GIT_UNAVAILABLE")
+
+
+def trusted_empty_hooks() -> Path:
+    try:
+        parent = EMPTY_HOOKS.parent.resolve(strict=True)
+        metadata = [node.lstat() for node in (parent, *parent.parents)]
+    except OSError as exc:
+        raise GitProbeError("TRUSTED_EMPTY_HOOKS_PARENT_UNAVAILABLE") from exc
+    owner = metadata[0].st_uid
+    if EMPTY_HOOKS.exists() or owner == os.geteuid() or any(
+        item.st_uid != owner or not stat.S_ISDIR(item.st_mode) or item.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        for item in metadata
+    ):
+        raise GitProbeError("TRUSTED_EMPTY_HOOKS_UNAVAILABLE")
+    return EMPTY_HOOKS
+
+
 def git_environment() -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_CONFIG_")}
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_PARAMETERS", "GIT_SSH",
-                "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS"):
-        env.pop(key, None)
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
-    return env
+    return {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0", "HOME": os.devnull, "XDG_CONFIG_HOME": os.devnull, "LC_ALL": "C"}
+
+
+def git_command(args: tuple[str, ...]) -> list[str]:
+    return [str(trusted_git()), "--no-pager", "--no-optional-locks",
+            "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={trusted_empty_hooks()}",
+            "-c", "diff.external=", "-c", "diff.trustExitCode=false", "-c", "core.attributesFile=/dev/null",
+            "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never", *args]
+
+
+def bounded_git(root: Path, *args: str) -> GitResult:
+    try:
+        process = subprocess.Popen(git_command(args), cwd=root, env=git_environment(),
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        raise GitProbeError("GIT_UNAVAILABLE") from exc
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    sizes = {"stdout": 0, "stderr": 0}
+    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill(); process.wait(); raise GitProbeError("GIT_TIMEOUT")
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj); continue
+                label = key.data; sizes[label] += len(chunk)
+                if sizes[label] > GIT_OUTPUT_LIMIT:
+                    process.kill(); process.wait(); raise GitProbeError(f"GIT_{label.upper()}_LIMIT")
+                chunks[label].append(chunk)
+        returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        process.kill(); process.wait(); raise GitProbeError("GIT_TIMEOUT") from exc
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return GitResult(returncode, b"".join(chunks["stdout"]), b"".join(chunks["stderr"]))
 
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=root, env=git_environment(), text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+    try:
+        result = bounded_git(root, *args)
+    except GitProbeError as exc:
+        result = GitResult(125, b"", str(exc).encode())
+    stdout, stderr = result.stdout.decode("utf-8", "strict"), result.stderr.decode("utf-8", "replace")
+    completed = subprocess.CompletedProcess(["trusted-git", *args], result.returncode, stdout, stderr)
+    if check and result.returncode: raise subprocess.CalledProcessError(result.returncode, completed.args, stdout, stderr)
+    return completed
 
 
-def git_bytes(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["git", *args], cwd=root, env=git_environment(),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+def git_bytes(root: Path, *args: str) -> GitResult:
+    try:
+        return bounded_git(root, *args)
+    except GitProbeError as exc:
+        return GitResult(125, b"", str(exc).encode())
 
 
 def is_ancestor(root: Path, older: str, newer: str) -> bool:
     return git(root, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
 
 
+def repository_guard(root: Path, expected_name: str | None = None) -> list[str]:
+    errors: list[str] = []
+    try:
+        absolute = Path(os.path.abspath(root))
+        resolved = root.resolve(strict=True)
+        if absolute != resolved: errors.append("REPOSITORY_ROOT_NOT_CANONICAL")
+        if expected_name is not None and resolved.name != expected_name: errors.append("CONTROLLER_ROOT_NAME_MISMATCH")
+        git_dir = resolved / ".git"
+        if not stat.S_ISDIR(git_dir.lstat().st_mode) or git_dir.is_symlink(): errors.append("GIT_DIR_NOT_PRIVATE_DIRECTORY")
+        for name in ("config", "index"):
+            node = git_dir / name
+            if not stat.S_ISREG(node.lstat().st_mode) or node.is_symlink(): errors.append(f"GIT_{name.upper()}_NOT_REGULAR")
+        if not stat.S_ISDIR((git_dir / "objects").lstat().st_mode) or (git_dir / "objects").is_symlink():
+            errors.append("GIT_OBJECTS_NOT_PRIVATE_DIRECTORY")
+        forbidden = [git_dir / "shallow", git_dir / "commondir", git_dir / "gitdir", git_dir / "index.lock",
+                     git_dir / "info/grafts", git_dir / "objects/info/alternates",
+                     git_dir / "objects/info/http-alternates", git_dir / "info/sparse-checkout"]
+        if any(path.exists() or path.is_symlink() for path in forbidden): errors.append("GIT_ALTERNATE_SHALLOW_OR_SPARSE_STATE_FORBIDDEN")
+        replace_dir = git_dir / "refs/replace"
+        if replace_dir.exists() and any(replace_dir.iterdir()): errors.append("GIT_REPLACE_REFS_FORBIDDEN")
+        if list(git_dir.glob("sharedindex.*")): errors.append("GIT_SPLIT_INDEX_FORBIDDEN")
+    except OSError:
+        return errors + ["REPOSITORY_LAYOUT_UNAVAILABLE"]
+    if errors: return errors
+    config_path = resolved / ".git/config"
+    config = git(resolved, "config", "--file", str(config_path), "--no-includes", "--name-only",
+                 "--get-regexp", ".*", check=False)
+    if config.returncode not in (0, 1): return ["LOCAL_CONFIG_UNREADABLE"]
+    forbidden_key = re.compile(
+        r"^(include\.|includeif\.|url\.|core\.(sshcommand|fsmonitor|hookspath|worktree|alternaterefscommand|sparsecheckout|splitindex)|"
+        r"diff\.|filter\.|remote\..*\.(uploadpack|receivepack|promisor|partialclonefilter)|extensions\.(partialclone|worktreeconfig)|index\.sparse)", re.I)
+    if any(forbidden_key.match(key) for key in config.stdout.splitlines()): errors.append("LOCAL_GIT_ACTIVE_CONFIG_FORBIDDEN")
+    return errors
+
+
 def remote_errors(root: Path, expected: str) -> list[str]:
     errors: list[str] = []
     commands = {
-        "RAW_FETCH_URL": ("config", "--local", "--get-all", "remote.origin.url"),
-        "RAW_PUSH_URL": ("config", "--local", "--get-all", "remote.origin.pushurl"),
+        "RAW_FETCH_URL": ("config", "--file", str(root / ".git/config"), "--no-includes", "--get-all", "remote.origin.url"),
+        "RAW_PUSH_URL": ("config", "--file", str(root / ".git/config"), "--no-includes", "--get-all", "remote.origin.pushurl"),
         "EFFECTIVE_FETCH_URL": ("remote", "get-url", "--all", "origin"),
         "EFFECTIVE_PUSH_URL": ("remote", "get-url", "--push", "--all", "origin"),
     }
@@ -280,11 +429,6 @@ def remote_errors(root: Path, expected: str) -> list[str]:
     if not values["RAW_PUSH_URL"]: values["RAW_PUSH_URL"] = values["RAW_FETCH_URL"][:]
     for label, urls in values.items():
         if urls != [expected]: errors.append(f"{label}_MISMATCH expected={expected} actual={urls}")
-    rewrites = git(root, "config", "--local", "--get-regexp", r"^url\..*\.(insteadOf|pushInsteadOf)$", check=False)
-    if rewrites.returncode == 0 and rewrites.stdout.strip(): errors.append("LOCAL_URL_REWRITE_FORBIDDEN")
-    dangerous = git(root, "config", "--local", "--get-regexp",
-                    r"^(core\.(sshCommand|fsmonitor|hooksPath)|remote\.origin\.(uploadpack|receivepack)|include\.|includeIf\.)", check=False)
-    if dangerous.returncode == 0 and dangerous.stdout.strip(): errors.append("LOCAL_GIT_EXECUTION_OVERRIDE_FORBIDDEN")
     return errors
 
 
@@ -314,7 +458,7 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
     strict_object(record, EVIDENCE_KEYS, where, errors)
     text(record.get("id"), f"{where}.id", errors, EVIDENCE_RE)
     if record.get("kind") not in {"merge_ci", "external_probe"}: errors.append(f"EVIDENCE_KIND {where}")
-    text(record.get("repository_id"), f"{where}.repository_id", errors, ID_RE)
+    repository_id = text(record.get("repository_id"), f"{where}.repository_id", errors, ID_RE)
     text(record.get("merge_sha"), f"{where}.merge_sha", errors, SHA_RE)
     text(record.get("content_digest"), f"{where}.content_digest", errors, DIGEST_RE)
     if record.get("provenance") != "measured": errors.append(f"EVIDENCE_NOT_MEASURED {where}")
@@ -324,25 +468,38 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
     ci = strict_object(record.get("ci"), CI_KEYS, f"{where}.ci", errors)
     if ci.get("provider") != "github-actions" or ci.get("status") != "success": errors.append(f"EVIDENCE_CI_NOT_SUCCESS {where}")
     if not isinstance(ci.get("run_id"), str) or not ci.get("run_id", "").isdigit(): errors.append(f"EVIDENCE_CI_RUN_ID {where}")
-    if not isinstance(ci.get("url"), str) or not re.fullmatch(r"https://github\.com/.+/actions/runs/[0-9]+", ci.get("url", "")):
-        errors.append(f"EVIDENCE_CI_URL {where}")
+    expected_url = f"{REPOSITORY_WEB.get(repository_id, '')}/actions/runs/{ci.get('run_id')}"
+    if ci.get("url") != expected_url: errors.append(f"EVIDENCE_CI_URL {where}")
     if ci.get("head_sha") != record.get("merge_sha"): errors.append(f"EVIDENCE_CI_SHA_MISMATCH {where}")
-    string_list(ci.get("required_checks"), f"{where}.ci.required_checks", errors, nonempty=True)
+    checks = string_list(ci.get("required_checks"), f"{where}.ci.required_checks", errors, nonempty=True)
+    if repository_id not in NORMATIVE_CHECKS or set(checks) != NORMATIVE_CHECKS.get(repository_id):
+        errors.append(f"EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE {where}")
     contract = record.get("check_contract")
-    if contract is not None:
+    expected_contract = CHECK_CONTRACT.get(repository_id)
+    if expected_contract is None and contract is not None:
+        errors.append(f"EVIDENCE_CHECK_CONTRACT_UNEXPECTED {where}")
+    elif expected_contract is not None and contract is None:
+        errors.append(f"EVIDENCE_CHECK_CONTRACT_REQUIRED {where}")
+    elif contract is not None:
         contract = strict_object(contract, CHECK_CONTRACT_KEYS, f"{where}.check_contract", errors)
         text(contract.get("path"), f"{where}.check_contract.path", errors)
-        if contract.get("format") not in {"ccm-capability-manifest-v1", "aor-capability-manifest-v1"}:
-            errors.append(f"EVIDENCE_CHECK_CONTRACT_FORMAT {where}")
+        if (contract.get("path"), contract.get("format")) != expected_contract:
+            errors.append(f"EVIDENCE_CHECK_CONTRACT_BINDING {where}")
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
 
 
-def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime) -> tuple[list[str], bool]:
-    errors = remote_errors(root, CONTROLLER_REMOTE)
+def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime,
+                      public_root: Path) -> tuple[list[str], bool]:
+    errors = repository_guard(root, "ccm-multi")
     unavailable = False
+    if errors: return errors, True
+    errors.extend(remote_errors(root, CONTROLLER_REMOTE))
     admission = state["admission"]
     if not SHA_RE.fullmatch(head) or git(root, "cat-file", "-e", f"{head}^{{commit}}", check=False).returncode:
         return errors + ["CONTROLLER_HEAD_UNAVAILABLE"], True
+    remote_main = git(root, "rev-parse", "refs/remotes/origin/main", check=False)
+    if remote_main.returncode or remote_main.stdout.strip() != head:
+        return errors + ["CONTROLLER_PREFETCHED_ORIGIN_MAIN_MISMATCH"], True
     issuance = admission["controller_commit_sha"]
     if git(root, "cat-file", "-e", f"{issuance}^{{commit}}", check=False).returncode:
         return errors + ["CONTROLLER_ISSUANCE_UNAVAILABLE"], True
@@ -412,7 +569,7 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
                 strict_object(external, EXTERNAL_KEYS, f"controller.external.{external_id}", errors)
                 if external.get("state") != "available": errors.append(f"CONTROLLER_EXTERNAL_UNAVAILABLE {external_id}")
                 required.update(external.get("evidence_refs", []))
-        if not required.issubset(set(admission["dependency_evidence_refs"])): errors.append("CLAIM_REQUIRED_EVIDENCE_MISSING")
+        if required != set(admission["dependency_evidence_refs"]): errors.append("CLAIM_REQUIRED_EVIDENCE_SET_MISMATCH")
     bindings = {item["id"]: item["digest"] for item in admission["dependency_evidence"]}
     for evidence_id in admission["dependency_evidence_refs"]:
         record = evidence.get(evidence_id)
@@ -421,6 +578,17 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
             continue
         validate_evidence(record, at, f"controller.evidence.{evidence_id}", errors)
         if canonical_digest(record) != bindings.get(evidence_id): errors.append(f"EVIDENCE_DIGEST_MISMATCH {evidence_id}")
+        contract = record.get("check_contract")
+        if contract is not None:
+            if record.get("repository_id") != "ccm-public":
+                errors.append(f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {evidence_id}")
+            else:
+                if not is_ancestor(public_root, record.get("merge_sha", ""), git(public_root, "rev-parse", "HEAD").stdout.strip()):
+                    errors.append(f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {evidence_id}")
+                content = git_bytes(public_root, "show", f"{record.get('merge_sha')}:{contract.get('path')}")
+                measured = "sha256:" + hashlib.sha256(content.stdout).hexdigest() if content.returncode == 0 else None
+                if measured != contract.get("content_digest"):
+                    errors.append(f"EVIDENCE_CHECK_CONTRACT_DIGEST_MISMATCH {evidence_id}")
     predecessor = admission["predecessor"]
     if predecessor:
         previous_claim = claims.get(predecessor["claim_id"])
@@ -428,6 +596,24 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
             errors.append("PREDECESSOR_CLAIM_MISSING")
         elif previous_claim.get("status") == "active" or previous_claim.get("work_item_id") != claim.get("work_item_id") or previous_claim.get("repository_id") != "ccm-public":
             errors.append("PREDECESSOR_CLAIM_NOT_CLOSED_OR_MISMATCHED")
+        else:
+            predecessor_path = Path("delivery/executions") / f"{predecessor['claim_id']}.json"
+            predecessor_state = previous_state(public_root, predecessor["checkpoint_sha"], predecessor_path)
+            if predecessor_state is None:
+                errors.append("PREDECESSOR_ADMISSION_STATE_MISSING")
+            else:
+                prior_admission = predecessor_state["admission"]
+                identity = {"id": prior_admission["claim_id"], "work_item_id": prior_admission["work_item_id"],
+                    "owner_principal": prior_admission["owner_principal"], "repository_id": "ccm-public",
+                    "base_sha": prior_admission["base_sha"], "branch": prior_admission["branch"],
+                    "capabilities": prior_admission["capabilities"], "generation": prior_admission["claim_generation"],
+                    "issued_at": prior_admission["issued_at"], "expires_at": prior_admission["expires_at"],
+                    "dependency_evidence_refs": prior_admission["dependency_evidence_refs"]}
+                if any(previous_claim.get(key) != value for key, value in identity.items()):
+                    errors.append("PREDECESSOR_ADMISSION_IDENTITY_MISMATCH")
+                active_identity = {**identity, "status": "active"}
+                if canonical_digest(active_identity) != prior_admission["claim_digest"]:
+                    errors.append("PREDECESSOR_ACTIVE_CLAIM_DIGEST_MISMATCH")
     return errors, unavailable
 
 
@@ -446,7 +632,11 @@ def exact_state_errors(root: Path, head: str, path: Path) -> list[str]:
     if len(lines) != 1 or not lines[0].startswith("100644 blob "):
         errors.append("STATE_HEAD_MODE_OR_ENTRY_MISMATCH")
     blob = git_bytes(root, "show", f"{head}:{path.as_posix()}")
-    try: worktree = (root / path).read_bytes()
+    try:
+        target = root / path
+        if target.resolve(strict=True) != Path(os.path.abspath(target)) or not stat.S_ISREG(target.lstat().st_mode) or target.is_symlink():
+            errors.append("STATE_WORKTREE_PATH_UNSAFE")
+        worktree = target.read_bytes()
     except OSError: worktree = b""
     if blob.returncode != 0 or blob.stdout != worktree: errors.append("STATE_BYTES_DIFFER_FROM_HEAD")
     flags = git(root, "ls-files", "-v", "--", path.as_posix(), check=False).stdout.splitlines()
@@ -466,6 +656,63 @@ def append_only_errors(prior: dict[str, Any], state: dict[str, Any]) -> list[str
     return errors
 
 
+def task_acceptance(raw: bytes, work_item: str, errors: list[str]) -> list[str]:
+    try: lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        errors.append("TODO_NOT_UTF8"); return []
+    heading = f"### {work_item}"
+    try: start = lines.index(heading) + 1
+    except ValueError:
+        errors.append("TODO_ACCEPTANCE_HEADING_MISSING"); return []
+    selected: list[str] = []
+    for line in lines[start:]:
+        if line.startswith("### "): break
+        selected.append(line)
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in selected + [""]:
+        stripped = line.strip()
+        if stripped: current.append(stripped)
+        elif current: paragraphs.append(" ".join(current)); current = []
+    if not paragraphs: errors.append("TODO_ACCEPTANCE_EMPTY")
+    return paragraphs
+
+
+def public_contract_errors(root: Path, head: str, state: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    admission = state["admission"]
+    manifest = git_json(root, head, "delivery/capabilities.json", errors)
+    matches = [item for item in manifest.get("capabilities", []) if isinstance(item, dict)
+               and item.get("id") == admission["public_capability_id"]
+               and item.get("work_item") == admission["work_item_id"]]
+    if len(matches) != 1 or matches[0].get("status") != "ready":
+        return errors + ["PUBLIC_CAPABILITY_NOT_READY_OR_MISMATCHED"]
+    capability = matches[0]
+    checks = capability.get("required_checks")
+    if not isinstance(checks, list) or not checks or len(checks) != len(set(checks)) or not all(isinstance(item, str) and item for item in checks):
+        errors.append("PUBLIC_REQUIRED_CHECKS_INVALID")
+        checks = []
+    elif checks != admission["required_checks"]:
+        errors.append("PUBLIC_REQUIRED_CHECKS_BINDING_MISMATCH")
+    expected_spec = f"TODO.md#{admission['work_item_id'].lower()}"
+    if capability.get("specification") != expected_spec: errors.append("PUBLIC_SPECIFICATION_BINDING_MISMATCH")
+    todo = git_bytes(root, "show", f"{head}:TODO.md")
+    if todo.returncode:
+        errors.append("TODO_UNAVAILABLE"); return errors
+    acceptance = task_acceptance(todo.stdout, admission["work_item_id"], errors)
+    if canonical_digest(acceptance) != admission["acceptance_digest"]: errors.append("ACCEPTANCE_DIGEST_MISMATCH")
+    completed = state["execution"]["completed_acceptance"]
+    if completed != acceptance[:len(completed)]: errors.append("COMPLETED_ACCEPTANCE_NOT_NORMATIVE_PREFIX")
+    completed_checks = state["execution"]["completed_checks"]
+    if any(item.get("name") not in checks for item in completed_checks if isinstance(item, dict)):
+        errors.append("COMPLETED_CHECK_NOT_NORMATIVE")
+    if state["execution"]["phase"] == "candidate":
+        if completed != acceptance: errors.append("CANDIDATE_ACCEPTANCE_INCOMPLETE")
+        if [item.get("name") for item in completed_checks] != checks:
+            errors.append("CANDIDATE_REQUIRED_CHECKS_INCOMPLETE")
+    return errors
+
+
 def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, remote_head: str,
             controller_root: Path | None = None, controller_head: str | None = None) -> dict[str, Any]:
     errors = validate_state(state)
@@ -474,6 +721,10 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
     if errors: return result
     if not SHA_RE.fullmatch(remote_head):
         result["errors"].append("FORMAT remote_head")
+        return result
+    guard_errors = repository_guard(root)
+    if guard_errors:
+        result["errors"].extend(guard_errors)
         return result
     try:
         head = git(root, "rev-parse", "HEAD").stdout.strip()
@@ -544,19 +795,22 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
         result["classification"] = "stale"; result["errors"].extend(stale); return result
     if dirty:
         result["classification"] = "dirty"; result["errors"].append("WORKTREE_DIRTY"); return result
-    manifest_errors: list[str] = []
-    manifest = git_json(root, head, "delivery/capabilities.json", manifest_errors)
-    matches = [item for item in manifest.get("capabilities", []) if isinstance(item, dict)
-               and item.get("id") == admission["public_capability_id"]
-               and item.get("work_item") == admission["work_item_id"]]
-    if manifest_errors or len(matches) != 1 or matches[0].get("status") != "ready":
-        result["errors"].extend(manifest_errors or ["PUBLIC_CAPABILITY_NOT_READY_OR_MISMATCHED"])
+    contract_errors = public_contract_errors(root, head, state)
+    if contract_errors:
+        result["errors"].extend(contract_errors)
         return result
     if controller_root is None or controller_head is None:
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_SNAPSHOT_REQUIRED"); return result
     if not controller_root.is_dir():
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_UNAVAILABLE"); return result
-    control_errors, unavailable = controller_errors(controller_root, controller_head, state, at)
+    try:
+        canonical_controller = (root.parent / "ccm-multi").resolve(strict=True)
+        supplied_controller = controller_root.resolve(strict=True)
+    except OSError:
+        result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_UNAVAILABLE"); return result
+    if supplied_controller != canonical_controller:
+        result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_NONCANONICAL"); return result
+    control_errors, unavailable = controller_errors(controller_root, controller_head, state, at, root)
     if control_errors:
         result["classification"] = "local_only" if unavailable else "invalid"
         result["errors"].extend(control_errors)

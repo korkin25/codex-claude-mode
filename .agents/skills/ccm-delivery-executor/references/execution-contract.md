@@ -27,9 +27,10 @@ Accept a task only when the root supplies all of these from one immutable
 - work item, public capability ID, acceptance criteria, required checks, and
   injected reporting route.
 
-Re-read the exact claim object at the separately measured current controller
+Use only the resolved sibling `ccm-multi` checkout and re-read the exact claim object at the separately measured current controller
 SSH head when resuming. Require the issuance commit to remain its ancestor and
-the current object to remain identical, active, unexpired, and unsuperseded. Do
+prefetched `origin/main` to equal that head. Require the current object to
+remain identical, active, unexpired, and unsuperseded. Do
 not substitute a mutable branch name, prose report, local checkout, PR label,
 or CI result for exact object content.
 
@@ -48,6 +49,10 @@ It contains no authorization payload beyond identifiers and digests.
   names its first parent in `checkpoint.parent_sha`.
 - `completed_checks` and completed acceptance entries are append-only. Their
   prior order and bytes do not change; candidate state has no failed check.
+- Acceptance is the exact normalized paragraph list under the manifest-bound
+  `TODO.md` task heading, not agent prose. Its digest and the manifest's exact
+  non-empty required-check list are immutable admission fields. Candidate
+  completion equals that acceptance list and contains every required check.
 - `remaining_work` and `next_action` describe unfinished work; neither is an
   assertion that the work happened.
 - `candidate` is a phase, not evidence. The exact candidate is the clean local

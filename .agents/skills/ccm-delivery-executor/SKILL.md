@@ -24,6 +24,9 @@ input, not standing authority or permission to merge.
 4. Fetch only through the canonical SSH remote. Require a clean isolated
    worktree/clone whose `main` and remote `main` equal the claim base. Never use
    Git HTTPS or a credential store.
+   Use the resolved sibling `ccm-multi` checkout as controller source; require
+   its prefetched `origin/main` to equal the separately measured controller
+   head. Do not accept an arbitrary fixture or caller-selected registry root.
 5. Stop on missing, ambiguous, stale, expired, mismatched, or conflicting
    inputs. A claim permits preparation of a candidate only. It cannot grant
    architecture, release, deployment, secret, destructive, cost-bearing, or
@@ -80,7 +83,11 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
 The inspector does not access the network. Fetch and measure both heads over
 their canonical SSH remotes with a sanitized Git environment. It verifies
 effective fetch and push URLs and rejects multiple URLs, rewrites, HTTPS,
-state index flags, and state bytes/mode that differ from the exact HEAD blob.
+state index flags, alternate index/object/replace/namespace/shallow/sparse/path
+state, and state bytes/mode that differ from the exact HEAD blob. Every Git
+probe uses a trusted absolute executable, strict environment allowlist,
+disabled hooks/fsmonitor/external diff/lazy fetch, and time/output bounds; no
+repository-controlled program runs before repository configuration validation.
 Handle its result fail closed:
 
 - `clean`: resume only `next_action` after rechecking the claim in the exact
@@ -117,6 +124,11 @@ Before a planned restart or any intentional handoff:
 For ordinary progress use `kind=progress`. For the final task-branch commit use
 `phase=candidate` and `kind=candidate`; the clean pushed HEAD returned by the
 inspector is the exact candidate SHA. Never claim a commit before it exists.
+Candidate state must contain the exact non-empty acceptance paragraphs from the
+task's manifest-selected `TODO.md` section and every exact manifest
+`required_checks` name with a passed result. The inspector rejects caller-made
+acceptance/check names, missing checks, failed checks, or a stale contract
+digest.
 
 After an abrupt restart, preserve dirty files. Report the inspector result and
 material diff; do not reset, discard, force-push, or create a replacement
