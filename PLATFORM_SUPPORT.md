@@ -2,7 +2,10 @@
 
 Evidence and required validation captured on 2026-08-12. This matrix describes
 the current direct-Codex client. Linux x86_64 and macOS ARM64 are both
-first-class supported platforms.
+first-class target platforms; the gate at the end of this document determines
+when either becomes a release-level support claim. Planned `serve` and future
+provider-neutral or orchestrator behavior are outside the evidence for the
+implemented direct client recorded here.
 
 ## Evidence vocabulary
 

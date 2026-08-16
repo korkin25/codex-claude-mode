@@ -23,3 +23,16 @@ installed Codex CLI and can surface requests to execute commands or modify
 files. Review the selected agent, effective permission profile and every
 approval before accepting it. The project does not provide a security boundary
 independent of the configured Codex backend and operating system.
+
+The planned host-local `serve`/`ctl` split does not change that boundary. Its
+Unix socket is single-user and non-authoritative; a connected agent framework
+does not receive standing authority to approve requests. Approval execution
+must be bound to the exact approval ID, request digest, policy revision,
+expiry, operator principal and idempotency key, and changed, stale, expired or
+replayed records fail closed. `approved` means authorized; the effect and its
+outcome are recorded separately.
+
+Framework-mediated approval is procedural separation suitable only for one
+operator controlling the host. Multi-operator or higher-assurance approval
+requires an independently authenticated channel and must not rely solely on
+the same tool-capable framework.
