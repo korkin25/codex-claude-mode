@@ -124,6 +124,12 @@ tmp=
 "$HOME/.local/bin/codex-claude-mode"
 ```
 
+`SHA256SUMS` detects corruption or mismatch between downloaded release files;
+because it is fetched from the same GitHub Release, it is not an independent
+publisher signature or build-provenance attestation. The macOS binary is also
+not code-signed or notarized. Use only the expected repository/release and
+review the exact tag before installation.
+
 If `~/.local/bin` is not on your `PATH`, add this to `~/.zshrc` (macOS) or
 your shell's equivalent startup file:
 

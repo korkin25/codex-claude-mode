@@ -40,6 +40,19 @@ codex-claude-mode serve        headless: owns the app-server connection,
 `ctl` client observe the same sessions. The socket is filesystem-scoped to the
 invoking user under `$XDG_RUNTIME_DIR`; nothing binds to a network interface.
 
+Socket notifications are wake-up hints, not durable truth. Before publishing
+an observation from its direct app-server connection, `serve` records it in a
+bounded local observation journal. Clients resume from its monotonic cursor;
+if retention has removed a requested interval, they replace their projection
+from a fresh provider snapshot and display the history gap. This journal
+records only what the local gateway observed. It does not create task, run,
+policy or approval authority.
+
+`serve` owns direct-mode process probes, heartbeat timers and reconciliation.
+An OS service supervisor may keep `serve` alive, but neither a TUI/`ctl` client
+nor periodic model turns determine liveness. tmux may remain a human attach
+convenience; it is not a provider-state or approval source.
+
 A later optional step connects `serve` to `codex app-server daemon` instead of
 spawning its own child, so agents survive a `serve` restart. That path requires
 `codex app-server daemon enable-remote-control` and is not required for the
@@ -55,12 +68,18 @@ that framework, not here.
 Any future remote path must keep these properties:
 
 - approvals bind to the approval ID, a digest of the original request, an
-  expiry and an idempotency key, so a stale, altered or replayed decision is
-  rejected;
+  expected policy revision, expiry, authenticated principal and idempotency
+  key, so a stale, altered or replayed decision is rejected;
 - read-only observation and mutating actions are separately authorized;
 - reconnect resumes from a monotonic cursor with bounded retention and
   backpressure, and an expired cursor forces a fresh snapshot instead of a
   guess.
+
+An agent framework has no standing approval authority. It may carry only an
+operator's explicit decision after showing the raw request digest and diff;
+the executor validates the immutable authorization record immediately before
+the effect. An approved request records authorization, not successful
+execution.
 
 ## Compatibility boundary
 
