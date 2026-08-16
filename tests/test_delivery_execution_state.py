@@ -42,13 +42,20 @@ class ExecutionStateTests(unittest.TestCase):
         capability = {"document_type": "ccm-capability-manifest", "schema_version": 1,
             "repository": "https://github.com/korkin25/codex-claude-mode", "capabilities": [{
                 "id": "ccm.serve.v1", "work_item": "CCM-SERVE-001", "status": "ready",
-                "specification": "TODO.md#ccm-serve-001", "required_checks": self.required_checks}]}
+                "specification": "TODO.md#ccm-serve-001", "content_scope": ["src/", "tests/"],
+                "required_checks": self.required_checks}]}
         (self.root / "delivery").mkdir()
-        (self.root / "delivery/capabilities.json").write_text(json.dumps(capability), encoding="utf-8")
-        (self.root / "TODO.md").write_text("# Tasks\n\n### CCM-SERVE-001\n\n" + self.acceptance[0] + "\n", encoding="utf-8")
+        base_inspector = self.root / ".agents/skills/ccm-delivery-executor/scripts/inspect_state.py"
+        base_inspector.parent.mkdir(parents=True)
+        base_inspector.write_bytes(SCRIPT.read_bytes())
+        self.manifest_raw = json.dumps(capability).encode()
+        self.todo_raw = ("# Tasks\n\n### CCM-SERVE-001\n\n" + self.acceptance[0] + "\n").encode()
+        (self.root / "delivery/capabilities.json").write_bytes(self.manifest_raw)
+        (self.root / "TODO.md").write_bytes(self.todo_raw)
         (self.root / "base.txt").write_text("base\n", encoding="utf-8")
         run_git(self.root, "add", "."); run_git(self.root, "commit", "-m", "base")
         self.base = run_git(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "update-ref", "refs/remotes/origin/main", self.base)
         run_git(self.root, "switch", "-c", "task/serve")
         self.evidence = {"id": "evidence-dependency", "kind": "merge_ci", "repository_id": "ccm-multi",
             "merge_sha": "d" * 40, "content_digest": "sha256:" + "e" * 64,
@@ -94,6 +101,10 @@ class ExecutionStateTests(unittest.TestCase):
         return head
 
     def state(self, **overrides):
+        capability = json.loads(self.manifest_raw)["capabilities"][0]
+        contract = {"manifest_digest": inspector.bytes_digest(self.manifest_raw),
+                    "todo_digest": inspector.bytes_digest(self.todo_raw),
+                    "acceptance": self.acceptance, "capability": capability}
         admission = {"controller_commit_sha": self.controller_head,
             "claim_digest": inspector.canonical_digest(self.claim), "claim_id": self.claim["id"],
             "claim_generation": self.claim["generation"], "predecessor": None,
@@ -104,6 +115,8 @@ class ExecutionStateTests(unittest.TestCase):
             "dependency_evidence_refs": self.claim["dependency_evidence_refs"],
             "dependency_evidence": [{"id": self.evidence["id"], "digest": inspector.canonical_digest(self.evidence)}],
             "acceptance_digest": inspector.canonical_digest(self.acceptance),
+            "contract_digest": inspector.canonical_digest(contract),
+            "inspector_digest": inspector.bytes_digest(SCRIPT.read_bytes()),
             "required_checks": self.required_checks}
         admission.update(overrides)
         return {"document_type": "ccm-delivery-execution-state", "schema_version": 1,
@@ -121,10 +134,54 @@ class ExecutionStateTests(unittest.TestCase):
         run_git(self.root, "add", str(path)); run_git(self.root, "commit", "-m", "checkpoint")
         return run_git(self.root, "rev-parse", "HEAD")
 
-    def inspect(self, state, remote_head, *, controller=True, at="2026-08-17T00:00:00Z", path=None):
+    def inspect(self, state, remote_head, *, controller=True, at="2026-08-17T00:00:00Z", path=None,
+                public_main_head=None, predecessor_remote_head=None):
+        predecessor_head = state["admission"]["predecessor"]
+        predecessor_head = predecessor_head["checkpoint_sha"] if predecessor_head else None
+        if predecessor_remote_head is None: predecessor_remote_head = predecessor_head
         return inspector.inspect(self.root, path or self.state_path, state,
             datetime.fromisoformat(at.replace("Z", "+00:00")), remote_head,
-            self.controller if controller else None, self.controller_head if controller else None)
+            self.controller if controller else None, self.controller_head if controller else None,
+            self.base if public_main_head is None else public_main_head, predecessor_remote_head,
+            inspector.bytes_digest(SCRIPT.read_bytes()))
+
+    def test_public_main_requires_exact_external_prefetch_and_admission_binding(self):
+        state = self.state(); head = self.commit_state(state)
+        self.assertIn("PUBLIC_MAIN_MEASUREMENT_REQUIRED",
+                      inspector.inspect(self.root, self.state_path, state,
+                        datetime.fromisoformat("2026-08-17T00:00:00+00:00"), head)["errors"])
+        unknown = "f" * 40
+        self.assertIn("PUBLIC_MAIN_MEASURED_HEAD_UNKNOWN",
+                      self.inspect(state, head, public_main_head=unknown)["errors"])
+        run_git(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        self.assertIn("PUBLIC_PREFETCHED_ORIGIN_MAIN_MISSING", self.inspect(state, head)["errors"])
+        run_git(self.root, "update-ref", "refs/remotes/origin/main", head)
+        self.assertIn("PUBLIC_PREFETCHED_ORIGIN_MAIN_MISMATCH", self.inspect(state, head)["errors"])
+        self.assertIn("PUBLIC_MAIN_BASE_MISMATCH",
+                      self.inspect(state, head, public_main_head=head)["errors"])
+
+    def test_contract_is_base_bound_and_scope_covers_entire_diff(self):
+        state = self.state(); state["admission"]["contract_digest"] = "sha256:" + "0" * 64
+        head = self.commit_state(state)
+        self.assertIn("CONTRACT_DIGEST_MISMATCH", self.inspect(state, head)["errors"])
+        run_git(self.root, "reset", "--soft", "HEAD^")
+        (self.root / "TODO.md").write_text("tampered\n", encoding="utf-8")
+        run_git(self.root, "add", "."); run_git(self.root, "commit", "-m", "tamper governance")
+        head = run_git(self.root, "rev-parse", "HEAD")
+        self.assertIn("CONTENT_SCOPE_VIOLATION TODO.md", self.inspect(state, head)["errors"])
+
+    def test_inspector_is_bound_to_external_digest(self):
+        state = self.state(inspector_digest="sha256:" + "0" * 64); head = self.commit_state(state)
+        self.assertIn("INSPECTOR_EXTERNAL_DIGEST_MISMATCH", self.inspect(state, head)["errors"])
+
+    def test_cli_preserves_lexical_symlink_root(self):
+        state = self.state(); head = self.commit_state(state)
+        alias = self.root.parent / "public-cli-alias"; alias.symlink_to(self.root, target_is_directory=True)
+        with mock.patch("sys.stdout"):
+            status = inspector.main(["inspect", "--root", str(alias), "--state", str(self.state_path),
+                "--at", "2026-08-17T00:00:00Z", "--remote-head", head,
+                "--public-main-head", self.base, "--inspector-digest", inspector.bytes_digest(SCRIPT.read_bytes())])
+        self.assertEqual(1, status)
 
     def test_clean_checkpoint_requires_and_accepts_controller_snapshot(self):
         state = self.state(); head = self.commit_state(state)
@@ -251,6 +308,10 @@ class ExecutionStateTests(unittest.TestCase):
         head = self.commit_state(second, second_path)
         result = self.inspect(second, head, path=second_path)
         self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+        tree = run_git(self.root, "show", "-s", "--format=%T", predecessor_head)
+        newer = run_git(self.root, "commit-tree", tree, "-p", predecessor_head, "-m", "newer predecessor checkpoint")
+        result = self.inspect(second, head, path=second_path, predecessor_remote_head=newer)
+        self.assertIn("PREDECESSOR_NOT_LATEST_REMOTE_HEAD", result["errors"])
 
     def test_generation_two_rejects_mismatched_predecessor_admission(self):
         first = self.state(); predecessor_head = self.commit_state(first)
@@ -361,7 +422,8 @@ class ExecutionStateTests(unittest.TestCase):
         state = self.state(); head = self.commit_state(state)
         arbitrary = self.root.parent / "arbitrary"; arbitrary.mkdir()
         result = inspector.inspect(self.root, self.state_path, state,
-            datetime.fromisoformat("2026-08-17T00:00:00+00:00"), head, arbitrary, self.controller_head)
+            datetime.fromisoformat("2026-08-17T00:00:00+00:00"), head, arbitrary, self.controller_head,
+            self.base, None, inspector.bytes_digest(SCRIPT.read_bytes()))
         self.assertEqual("local_only", result["classification"])
         self.assertIn("CONTROLLER_ROOT_NONCANONICAL", result["errors"])
 
@@ -383,10 +445,11 @@ class ExecutionStateTests(unittest.TestCase):
             "completed_checks": [{"name": name, "command": f"verify {name}", "outcome": "passed"}
                                  for name in self.required_checks]})
         state["checkpoint"]["kind"] = "candidate"
-        self.assertEqual([], inspector.public_contract_errors(self.root, self.base, state))
+        digest = inspector.bytes_digest(SCRIPT.read_bytes())
+        self.assertEqual([], inspector.public_contract_errors(self.root, self.base, self.state_path, state, digest))
         state["execution"]["completed_acceptance"] = ["caller supplied"]
         state["execution"]["completed_checks"] = [{"name": "invented", "command": "true", "outcome": "passed"}]
-        errors = inspector.public_contract_errors(self.root, self.base, state)
+        errors = inspector.public_contract_errors(self.root, self.base, self.state_path, state, digest)
         self.assertIn("COMPLETED_ACCEPTANCE_NOT_NORMATIVE_PREFIX", errors)
         self.assertIn("CANDIDATE_ACCEPTANCE_INCOMPLETE", errors)
         self.assertIn("COMPLETED_CHECK_NOT_NORMATIVE", errors)

@@ -35,7 +35,7 @@ ADMISSION_KEYS = {
     "controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor",
     "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha",
     "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence",
-    "acceptance_digest", "required_checks",
+    "acceptance_digest", "contract_digest", "inspector_digest", "required_checks",
 }
 PREDECESSOR_KEYS = {"claim_id", "generation", "checkpoint_sha"}
 EVIDENCE_BINDING_KEYS = {"id", "digest"}
@@ -97,6 +97,10 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def canonical_digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def bytes_digest(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
 def load_json_bytes(raw: bytes, where: str, errors: list[str]) -> dict[str, Any]:
@@ -231,6 +235,8 @@ def validate_state(state: dict[str, Any]) -> list[str]:
     if len(binding_ids) != len(set(binding_ids)): errors.append("DUPLICATE admission.dependency_evidence")
     if set(binding_ids) != set(refs): errors.append("DEPENDENCY_EVIDENCE_BINDING_SET_MISMATCH")
     text(admission.get("acceptance_digest"), "admission.acceptance_digest", errors, DIGEST_RE)
+    text(admission.get("contract_digest"), "admission.contract_digest", errors, DIGEST_RE)
+    text(admission.get("inspector_digest"), "admission.inspector_digest", errors, DIGEST_RE)
     string_list(admission.get("required_checks"), "admission.required_checks", errors, nonempty=True)
 
     execution = strict_object(state.get("execution"), EXECUTION_KEYS, "execution", errors)
@@ -754,10 +760,24 @@ def task_acceptance(raw: bytes, work_item: str, errors: list[str]) -> list[str]:
     return paragraphs
 
 
-def public_contract_errors(root: Path, head: str, state: dict[str, Any]) -> list[str]:
+def scope_allows(path: str, scopes: list[str], state_paths: set[str]) -> bool:
+    if path in state_paths:
+        return True
+    return any(path == scope.rstrip("/") or (scope.endswith("/") and path.startswith(scope)) for scope in scopes)
+
+
+def public_contract_errors(root: Path, head: str, state_path: Path, state: dict[str, Any],
+                           inspector_digest: str) -> list[str]:
     errors: list[str] = []
     admission = state["admission"]
-    manifest = git_json(root, head, "delivery/capabilities.json", errors)
+    base = admission["base_sha"]
+    manifest_raw = git_bytes(root, "show", f"{base}:delivery/capabilities.json")
+    todo = git_bytes(root, "show", f"{base}:TODO.md")
+    if manifest_raw.returncode:
+        errors.append("BASE_MANIFEST_UNAVAILABLE"); return errors
+    if todo.returncode:
+        errors.append("BASE_TODO_UNAVAILABLE"); return errors
+    manifest = load_json_bytes(manifest_raw.stdout, f"{base}:delivery/capabilities.json", errors)
     matches = [item for item in manifest.get("capabilities", []) if isinstance(item, dict)
                and item.get("id") == admission["public_capability_id"]
                and item.get("work_item") == admission["work_item_id"]]
@@ -772,11 +792,43 @@ def public_contract_errors(root: Path, head: str, state: dict[str, Any]) -> list
         errors.append("PUBLIC_REQUIRED_CHECKS_BINDING_MISMATCH")
     expected_spec = f"TODO.md#{admission['work_item_id'].lower()}"
     if capability.get("specification") != expected_spec: errors.append("PUBLIC_SPECIFICATION_BINDING_MISMATCH")
-    todo = git_bytes(root, "show", f"{head}:TODO.md")
-    if todo.returncode:
-        errors.append("TODO_UNAVAILABLE"); return errors
     acceptance = task_acceptance(todo.stdout, admission["work_item_id"], errors)
     if canonical_digest(acceptance) != admission["acceptance_digest"]: errors.append("ACCEPTANCE_DIGEST_MISMATCH")
+    scopes = capability.get("content_scope")
+    if not isinstance(scopes, list) or not scopes or not all(isinstance(item, str) and item and not item.startswith(("/", ".")) and ".." not in Path(item).parts for item in scopes):
+        errors.append("PUBLIC_CONTENT_SCOPE_INVALID"); scopes = []
+    contract = {
+        "manifest_digest": bytes_digest(manifest_raw.stdout),
+        "todo_digest": bytes_digest(todo.stdout),
+        "acceptance": acceptance,
+        "capability": capability,
+    }
+    if canonical_digest(contract) != admission["contract_digest"]: errors.append("CONTRACT_DIGEST_MISMATCH")
+    state_paths = {state_path.as_posix()}
+    if admission["predecessor"]:
+        state_paths.add(f"delivery/executions/{admission['predecessor']['claim_id']}.json")
+    changed = git_bytes(root, "diff", "--no-renames", "--name-only", "-z", base, head)
+    if changed.returncode:
+        errors.append("CHANGED_PATHS_UNAVAILABLE")
+    else:
+        for raw_path in changed.stdout.split(b"\0"):
+            if not raw_path: continue
+            try: path = raw_path.decode("utf-8")
+            except UnicodeDecodeError:
+                errors.append("CHANGED_PATH_NOT_UTF8"); continue
+            if not scope_allows(path, scopes, state_paths): errors.append(f"CONTENT_SCOPE_VIOLATION {path}")
+    inspector_path = Path(__file__)
+    base_inspector = git_bytes(root, "show", f"{base}:.agents/skills/ccm-delivery-executor/scripts/inspect_state.py")
+    if base_inspector.returncode:
+        errors.append("BASE_INSPECTOR_UNAVAILABLE")
+    elif bytes_digest(base_inspector.stdout) != inspector_digest:
+        errors.append("BASE_INSPECTOR_DIGEST_MISMATCH")
+    try: running_digest = bytes_digest(inspector_path.read_bytes())
+    except OSError:
+        errors.append("INSPECTOR_UNREADABLE")
+    else:
+        if inspector_digest != admission["inspector_digest"] or running_digest != inspector_digest:
+            errors.append("INSPECTOR_EXTERNAL_DIGEST_MISMATCH")
     completed = state["execution"]["completed_acceptance"]
     if completed != acceptance[:len(completed)]: errors.append("COMPLETED_ACCEPTANCE_NOT_NORMATIVE_PREFIX")
     completed_checks = state["execution"]["completed_checks"]
@@ -790,7 +842,9 @@ def public_contract_errors(root: Path, head: str, state: dict[str, Any]) -> list
 
 
 def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, remote_head: str,
-            controller_root: Path | None = None, controller_head: str | None = None) -> dict[str, Any]:
+            controller_root: Path | None = None, controller_head: str | None = None,
+            public_main_head: str | None = None, predecessor_remote_head: str | None = None,
+            inspector_digest: str | None = None) -> dict[str, Any]:
     errors = validate_state(state)
     result: dict[str, Any] = {"admitted": False, "classification": "invalid", "errors": errors,
                               "facts": {}, "next_action": state.get("checkpoint", {}).get("next_action")}
@@ -818,6 +872,19 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
     if local_invalid:
         result["errors"].extend(local_invalid)
         return result
+    if public_main_head is None or not SHA_RE.fullmatch(public_main_head):
+        result["errors"].append("PUBLIC_MAIN_MEASUREMENT_REQUIRED"); return result
+    if inspector_digest is None or not DIGEST_RE.fullmatch(inspector_digest):
+        result["errors"].append("INSPECTOR_EXTERNAL_DIGEST_REQUIRED"); return result
+    prefetched_main = git(root, "rev-parse", "refs/remotes/origin/main", check=False)
+    if prefetched_main.returncode:
+        result["errors"].append("PUBLIC_PREFETCHED_ORIGIN_MAIN_MISSING"); return result
+    if git(root, "cat-file", "-e", f"{public_main_head}^{{commit}}", check=False).returncode:
+        result["errors"].append("PUBLIC_MAIN_MEASURED_HEAD_UNKNOWN"); return result
+    if prefetched_main.stdout.strip() != public_main_head:
+        result["errors"].append("PUBLIC_PREFETCHED_ORIGIN_MAIN_MISMATCH"); return result
+    if public_main_head != admission["base_sha"]:
+        result["errors"].append("PUBLIC_MAIN_BASE_MISMATCH"); return result
     issued = datetime.fromisoformat(admission["issued_at"].replace("Z", "+00:00"))
     expires = datetime.fromisoformat(admission["expires_at"].replace("Z", "+00:00"))
     updated = datetime.fromisoformat(state["checkpoint"]["updated_at"].replace("Z", "+00:00"))
@@ -851,6 +918,12 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
         else:
             if not predecessor or parent != predecessor["checkpoint_sha"]: stale.append("GENERATION_CHAIN_PARENT_MISMATCH")
             else:
+                if predecessor_remote_head is None or not SHA_RE.fullmatch(predecessor_remote_head):
+                    stale.append("PREDECESSOR_REMOTE_HEAD_REQUIRED")
+                elif git(root, "cat-file", "-e", f"{predecessor_remote_head}^{{commit}}", check=False).returncode:
+                    stale.append("PREDECESSOR_REMOTE_HEAD_UNKNOWN")
+                elif predecessor_remote_head != predecessor["checkpoint_sha"]:
+                    stale.append("PREDECESSOR_NOT_LATEST_REMOTE_HEAD")
                 predecessor_state = previous_state(root, predecessor["checkpoint_sha"], Path("delivery/executions") / f"{predecessor['claim_id']}.json")
                 if predecessor_state is None:
                     stale.append("GENERATION_PREDECESSOR_STATE_MISSING")
@@ -871,7 +944,7 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
         result["classification"] = "stale"; result["errors"].extend(stale); return result
     if dirty:
         result["classification"] = "dirty"; result["errors"].append("WORKTREE_DIRTY"); return result
-    contract_errors = public_contract_errors(root, head, state)
+    contract_errors = public_contract_errors(root, head, state_path, state, inspector_digest)
     if contract_errors:
         result["errors"].extend(contract_errors)
         return result
@@ -879,12 +952,14 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_SNAPSHOT_REQUIRED"); return result
     if not controller_root.is_dir():
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_UNAVAILABLE"); return result
+    canonical_controller_lexical = root.parent / "ccm-multi"
     try:
-        canonical_controller = (root.parent / "ccm-multi").resolve(strict=True)
+        canonical_controller = canonical_controller_lexical.resolve(strict=True)
         supplied_controller = controller_root.resolve(strict=True)
     except OSError:
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_UNAVAILABLE"); return result
-    if supplied_controller != canonical_controller:
+    if (controller_root != canonical_controller_lexical or supplied_controller != controller_root
+            or supplied_controller != canonical_controller):
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_NONCANONICAL"); return result
     control_errors, unavailable = controller_errors(controller_root, controller_head, state, at, root)
     if control_errors:
@@ -911,6 +986,9 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("--state", required=True, type=Path)
     inspect_parser.add_argument("--at", required=True)
     inspect_parser.add_argument("--remote-head", required=True)
+    inspect_parser.add_argument("--public-main-head", required=True)
+    inspect_parser.add_argument("--predecessor-remote-head")
+    inspect_parser.add_argument("--inspector-digest", required=True)
     inspect_parser.add_argument("--controller-root", type=Path)
     inspect_parser.add_argument("--controller-head")
     args = parser.parse_args(argv)
@@ -925,12 +1003,18 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc: errors.append(str(exc)); at = datetime.min
     if errors:
         print(json.dumps({"admitted": False, "classification": "invalid", "errors": errors}, sort_keys=True)); return 1
-    root = args.root.resolve()
-    try: relative_state = state_path.resolve().relative_to(root)
+    root = Path(os.path.abspath(args.root))
+    if root != root.resolve():
+        print(json.dumps({"admitted": False, "classification": "invalid", "errors": ["REPOSITORY_ROOT_NOT_CANONICAL"]}, sort_keys=True)); return 1
+    try:
+        lexical_state = Path(os.path.abspath(state_path))
+        if lexical_state != lexical_state.resolve(): raise ValueError
+        relative_state = lexical_state.relative_to(root)
     except ValueError:
         print(json.dumps({"admitted": False, "classification": "invalid", "errors": ["STATE_OUTSIDE_ROOT"]}, sort_keys=True)); return 1
     result = inspect(root, relative_state, state, at, args.remote_head,
-                     args.controller_root.resolve() if args.controller_root else None, args.controller_head)
+                     Path(os.path.abspath(args.controller_root)) if args.controller_root else None, args.controller_head,
+                     args.public_main_head, args.predecessor_remote_head, args.inspector_digest)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["admitted"] else 1
 

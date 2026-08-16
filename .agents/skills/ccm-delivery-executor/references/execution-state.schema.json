@@ -21,7 +21,7 @@
     "admission": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor", "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha", "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence", "acceptance_digest", "required_checks"],
+      "required": ["controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor", "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha", "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence", "acceptance_digest", "contract_digest", "inspector_digest", "required_checks"],
       "properties": {
         "controller_commit_sha": { "$ref": "#/$defs/sha" },
         "claim_digest": { "$ref": "#/$defs/digest" },
@@ -64,6 +64,8 @@
           }
         },
         "acceptance_digest": { "$ref": "#/$defs/digest" },
+        "contract_digest": { "$ref": "#/$defs/digest" },
+        "inspector_digest": { "$ref": "#/$defs/digest" },
         "required_checks": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       }
     },

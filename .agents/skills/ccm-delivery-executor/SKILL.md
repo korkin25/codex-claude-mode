@@ -76,15 +76,25 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
   .agents/skills/ccm-delivery-executor/scripts/inspect_state.py inspect \
   --root . --state delivery/executions/<claim-id>.json \
   --at <timezone-aware-RFC3339> --remote-head <40-hex-SSH-branch-head> \
+  --public-main-head <40-hex-SSH-main-head> \
+  --inspector-digest <externally-measured-sha256-digest> \
+  [--predecessor-remote-head <40-hex-SSH-predecessor-head>] \
   --controller-root <isolated-ccm-multi-checkout> \
   --controller-head <40-hex-SSH-main-head>
 ```
 
-The inspector does not access the network. Fetch and measure both heads over
-their canonical SSH remotes with a sanitized Git environment. It verifies
+The inspector does not access the network. Execute the inspector whose digest
+was measured from the exact admitted base (prefer a clean checkout of that
+base); the digest is both an external CLI input and an immutable admission
+field. Fetch and measure the task head, public `main`, any predecessor head,
+and the controller head over their canonical SSH remotes with a sanitized Git environment. It verifies
 effective fetch and push URLs and rejects multiple URLs, rewrites, HTTPS,
 state index flags, alternate index/object/replace/namespace/shallow/sparse/path
-state, and state bytes/mode that differ from the exact HEAD blob. Every Git
+state, and state bytes/mode that differ from the exact HEAD blob. Prefetched
+`origin/main`, externally measured public main, and `admission.base_sha` must
+be identical. The complete `base..HEAD` changed-path set must fit the base
+manifest's `content_scope`, except the current and explicitly chained
+predecessor state documents. Every Git
 probe uses a trusted absolute executable, strict environment allowlist,
 disabled hooks/fsmonitor/external diff/lazy fetch, and time/output bounds; no
 repository-controlled program runs before repository configuration validation.

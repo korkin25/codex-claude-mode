@@ -25,7 +25,10 @@ Accept a task only when the root supplies all of these from one immutable
   SHA, exclusive capability set, and dependency evidence references;
 - a canonical compact-JSON digest for every dependency evidence object;
 - work item, public capability ID, acceptance criteria, required checks, and
-  injected reporting route.
+  injected reporting route;
+- the full base contract digest (exact manifest bytes, exact `TODO.md` bytes,
+  normalized acceptance and complete capability declaration) and the external
+  SHA-256 digest of the inspector taken from that same admitted base.
 
 Use only the resolved sibling `ccm-multi` checkout and re-read the exact claim object at the separately measured current controller
 SSH head when resuming. Require the issuance commit to remain its ancestor and
@@ -43,6 +46,9 @@ It contains no authorization payload beyond identifiers and digests.
 - One document represents one claim generation and one branch. Generation 1
   begins at the exact public base; later generations explicitly chain to the
   immediately preceding closed claim and pushed checkpoint SHA.
+- Externally measured SSH `main`, prefetched `origin/main`, and the admission
+  base are equal. Later generations additionally require the named predecessor
+  checkpoint to equal its separately measured latest remote head.
 - `repository_id`, remote, work item, capability, base, branch, and generation
   are immutable within that document.
 - Checkpoint sequences increase; every task commit updates the document and
@@ -53,6 +59,11 @@ It contains no authorization payload beyond identifiers and digests.
   `TODO.md` task heading, not agent prose. Its digest and the manifest's exact
   non-empty required-check list are immutable admission fields. Candidate
   completion equals that acceptance list and contains every required check.
+- Every path changed across the full `base..HEAD` range is covered by the
+  base-bound capability `content_scope`, apart from the current state and its
+  named predecessor state. Governance, skills, CI, `TODO.md`, and the manifest
+  are therefore forbidden unless the immutable base declaration explicitly
+  includes them.
 - `remaining_work` and `next_action` describe unfinished work; neither is an
   assertion that the work happened.
 - `candidate` is a phase, not evidence. The exact candidate is the clean local
