@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed empty standard MCP form elicitation so `[y]` and the default Enter
+  choice accept an empty object, while non-empty and `openai/form` requests
+  remain fail-closed. Delivered by [PR #4](https://github.com/korkin25/codex-claude-mode/pull/4)
+  with successful [Linux/macOS CI](https://github.com/korkin25/codex-claude-mode/actions/runs/31911990635).
+
 ## 0.4.11 — 2026-08-14
 
 - Changed `Alt-I` into one explicit clipboard action: it attaches PNG/JPEG
