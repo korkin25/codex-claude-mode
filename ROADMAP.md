@@ -42,7 +42,10 @@ CCM-SERVE-001
 - **Direct compatibility:** `CCM-DIRECT-001` can proceed without `serve`; it
   preserves and verifies today's direct-Codex fallback.
 - **Optional daemon transport:** `CCM-DAEMON-001` is an optional extension after
-  `CCM-SERVE-001`. It is not on the core delivery path and cannot block it.
+  `CCM-SERVE-001`. It is blocked because a measured Codex 0.147.0 probe did not
+  provide the required proxy relay; a newer upstream Codex version must be
+  re-probed before implementation. This lane is not on the core delivery path
+  and cannot block it.
 
 Machine-readable status and evidence rules live in
 [`delivery/capabilities.json`](delivery/capabilities.json). A declaration is
@@ -56,5 +59,6 @@ an exact merge SHA, successful CI on that SHA and a measured content digest.
 - No patching, vendoring or replacing the installed Codex CLI.
 - No screen scraping or key injection into terminals as a source of state.
 
-Linux x86_64 and macOS ARM64 are both supported; see
-[PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
+Linux x86_64 and macOS ARM64 are intended first-class targets. Support claims
+remain capability- and evidence-gated; see
+[PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) for the measured matrix and gaps.

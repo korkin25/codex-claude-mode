@@ -63,14 +63,14 @@
       "id": "ccm.daemon-transport.v1",
       "work_item": "CCM-DAEMON-001",
       "lane": "optional-daemon",
-      "status": "planned",
+      "status": "blocked",
       "optional": true,
       "dependencies": ["ccm.serve.v1"],
       "specification": "TODO.md#ccm-daemon-001",
       "policy_version": 1,
       "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
       "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
-      "blockers": [],
+      "blockers": ["Measured Codex 0.147.0 probe did not provide the required app-server daemon proxy relay; re-probe a newer upstream Codex version before unblocking."],
       "verification": null
     },
     {
