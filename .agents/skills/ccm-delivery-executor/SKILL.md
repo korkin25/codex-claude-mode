@@ -149,10 +149,31 @@ controller.
 
 Show the root a detailed Russian report with changed files, material diff,
 tests, candidate SHA, and unresolved risks. Follow injected reporting rules:
-send the factual Russian pre-commit message before every commit and a separate
-post-push message with branch and a clickable commit URL. If no reporting route
-is available, stop before commit and request it. Never encode addresses in this
-public repository.
+send a factual Russian pre-commit message of one or two substantive lines before
+every commit. It states what is actually in the current diff and which checks
+have actually completed; it never says that the not-yet-created commit exists.
+If the diff changes materially after this report, send a refreshed pre-commit
+summary before committing.
+
+After every push, send a separate detailed Russian report. After a merge, the
+root sends the corresponding detailed merge report. Each post-push/merge report
+must include:
+
+- what changed and why;
+- affected components and material files;
+- security, trust-boundary, capability, approval, or authority changes, or an
+  explicit statement that there were none;
+- tests and checks that actually ran, with their real outcomes;
+- known limitations, unresolved risks, blockers, and unverified items;
+- exact branch and commit SHA (for a merge, source/target context and exact
+  merge SHA);
+- clickable commit and PR links, plus clickable exact-SHA CI links when those
+  runs exist; if CI is pending, say so and follow up with its final result.
+
+Reports never include secrets, credentials, private payloads, or injected
+routing; never describe plans, pending CI, or expected effects as completed.
+If no reporting route is available, stop before commit and request it. Never
+encode addresses in this public repository.
 
 The root controller creates the PR, verifies required CI on the exact candidate,
 obtains independent exact-SHA review, and merges. Any candidate change

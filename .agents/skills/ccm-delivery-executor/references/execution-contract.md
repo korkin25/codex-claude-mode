@@ -81,7 +81,20 @@ authority remains mandatory for architecture/contract choices, new runtime
 dependencies, releases, deployments, secrets, destructive or paid actions,
 and genuine ambiguity.
 
-Telegram destinations come only from active root/user instructions. Reports
-must be in Russian, factual, free of secrets, and include a clickable commit
-link after push. This public reference intentionally contains no chat or topic
-IDs.
+Telegram destinations come only from active root/user instructions. The
+pre-commit report is one or two substantive Russian lines describing the actual
+diff and completed verification. It must not claim that the commit already
+exists; a material diff change invalidates it and requires a refreshed report.
+
+Post-push and post-merge reports are separate, detailed, factual Russian
+messages. They include the change and its reason, affected components/material
+files, security and authority impact (including an explicit `none` when
+applicable), actual test outcomes, known limitations/blockers/unverified work,
+exact branch and SHA, and clickable commit/PR/exact-SHA CI links. A merge report
+also identifies source/target context and the exact merge SHA. Pending CI is
+reported as pending and followed by its final result; it is never presented as
+successful in advance.
+
+No report contains secrets, credentials, private payloads, or routing, and no
+plan or expected effect is described as completed. This public reference
+intentionally contains no chat or topic IDs.
