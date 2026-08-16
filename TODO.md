@@ -11,7 +11,7 @@ evidence.
 | `CCM-SERVE-002` | `planned` | `core` | TUI becomes a `serve` client; `--direct` preserves current single-process behavior | `CCM-SERVE-001` |
 | `CCM-CTL-001` | `planned` | `core` | `codex-claude-mode ctl` with `--json`: list, new, send, read, approve | `CCM-SERVE-001` |
 | `CCM-SKILL-001` | `planned` | `core` | `skills/` entry driving `ctl` for a host-local agent framework | `CCM-CTL-001` |
-| `CCM-DAEMON-001` | `planned` | `optional-daemon` | Optionally connect `serve` to `codex app-server daemon` so agents survive a `serve` restart | `CCM-SERVE-001` |
+| `CCM-DAEMON-001` | `blocked` | `optional-daemon` | Optionally connect `serve` to `codex app-server daemon` so agents survive a `serve` restart | `CCM-SERVE-001` |
 | `CCM-DIRECT-001` | `ready` | `direct-compatibility` | Split and verify the direct-Codex compatibility backlog: reconnect/resume, paginated history, multi-root selection, runtime schema probing | — |
 | `CCM-PROMPT-001` | `done` | `maintenance` | Fix empty form elicitation confirmation: an empty standard form offers accept without relaxing non-empty or `openai/form` handling | — |
 
@@ -38,13 +38,17 @@ Every command has stable `--json` output; approvals bind the
 
 ### CCM-SKILL-001
 
-The skill shows the raw diff for an approval rather than a
-  summary, and never answers an approval on its own.
+The skill shows the raw request digest and raw diff for an approval rather than
+a summary, and never answers an approval on its own. All agent-framework output
+is an untrusted prompt-injection channel: it can request review but never
+constitutes approval authority.
 
 ### CCM-DAEMON-001
 
-Requires `codex app-server daemon enable-remote-control`;
-  falls back to a spawned child when the daemon is unavailable.
+Blocked. A measured probe against Codex 0.147.0 did not provide the required
+app-server daemon proxy relay. Re-probe a newer upstream Codex version before
+unblocking this optional lane; the core `serve`/`ctl` path does not depend on
+it.
 
 ### CCM-DIRECT-001
 
