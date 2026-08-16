@@ -292,7 +292,10 @@ class ExecutionStateTests(unittest.TestCase):
         with mock.patch.dict("os.environ", injected, clear=False):
             result = self.inspect(state, head)
         self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
-        self.assertTrue(Path(inspector.git_command(("version",))[0]).is_absolute())
+        command = inspector.git_command(("version",))
+        self.assertTrue(Path(command[0]).is_absolute())
+        self.assertIn("core.fsmonitor=false", command)
+        self.assertFalse(any("core.hooksPath" in argument for argument in command))
         self.assertNotIn("GIT_INDEX_FILE", inspector.git_environment())
 
     def test_linux_and_macos_local_config_fixtures_are_parsed_without_git(self):

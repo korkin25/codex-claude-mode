@@ -27,7 +27,6 @@ PUBLIC_CAPABILITY_RE = re.compile(r"^ccm\.[a-z0-9]+(?:[.-][a-z0-9]+)*\.v[1-9][0-
 REMOTE = "git@github.com:korkin25/codex-claude-mode.git"
 CONTROLLER_REMOTE = "git@github.com:korkin25/ccm-multi.git"
 GIT_CANDIDATES = (Path("/usr/bin/git"), Path("/bin/git"))
-EMPTY_HOOKS = Path("/usr/share/ccm-public-empty-git-hooks")
 GIT_TIMEOUT_SECONDS = 5.0
 GIT_OUTPUT_LIMIT = 4 * 1024 * 1024
 TOP_KEYS = {"document_type", "schema_version", "repository", "admission", "execution", "checkpoint"}
@@ -385,21 +384,6 @@ def trusted_git() -> Path:
     raise GitProbeError("TRUSTED_GIT_UNAVAILABLE")
 
 
-def trusted_empty_hooks() -> Path:
-    try:
-        parent = EMPTY_HOOKS.parent.resolve(strict=True)
-        metadata = [node.lstat() for node in (parent, *parent.parents)]
-    except OSError as exc:
-        raise GitProbeError("TRUSTED_EMPTY_HOOKS_PARENT_UNAVAILABLE") from exc
-    owner = metadata[0].st_uid
-    if EMPTY_HOOKS.exists() or owner == os.geteuid() or any(
-        item.st_uid != owner or not stat.S_ISDIR(item.st_mode) or item.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-        for item in metadata
-    ):
-        raise GitProbeError("TRUSTED_EMPTY_HOOKS_UNAVAILABLE")
-    return EMPTY_HOOKS
-
-
 def git_environment() -> dict[str, str]:
     return {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
@@ -408,7 +392,7 @@ def git_environment() -> dict[str, str]:
 
 def git_command(args: tuple[str, ...]) -> list[str]:
     return [str(trusted_git()), "--no-pager", "--no-optional-locks",
-            "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={trusted_empty_hooks()}",
+            "-c", "core.fsmonitor=false",
             "-c", "diff.external=", "-c", "diff.trustExitCode=false", "-c", "core.attributesFile=/dev/null",
             "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never", *args]
 
