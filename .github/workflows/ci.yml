@@ -8,6 +8,21 @@ permissions:
   contents: read
 
 jobs:
+  governance:
+    name: Public capability manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate public capability manifest
+        run: |
+          python3 scripts/validate_capabilities.py
+          python3 -m unittest discover -s tests -p 'test_capability_manifest.py'
+
   rust:
     name: Rust 1.95 · ${{ matrix.artifact }}
     runs-on: ${{ matrix.runner }}

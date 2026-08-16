@@ -1,0 +1,91 @@
+{
+  "document_type": "ccm-capability-manifest",
+  "schema_version": 1,
+  "repository": "https://github.com/korkin25/codex-claude-mode",
+  "capabilities": [
+    {
+      "id": "ccm.serve.v1",
+      "work_item": "CCM-SERVE-001",
+      "lane": "core",
+      "status": "ready",
+      "optional": false,
+      "dependencies": [],
+      "specification": "TODO.md#ccm-serve-001",
+      "policy_version": 1,
+      "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    },
+    {
+      "id": "ccm.tui-over-serve.v1",
+      "work_item": "CCM-SERVE-002",
+      "lane": "core",
+      "status": "planned",
+      "optional": false,
+      "dependencies": ["ccm.serve.v1"],
+      "specification": "TODO.md#ccm-serve-002",
+      "policy_version": 1,
+      "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    },
+    {
+      "id": "ccm.ctl.v1",
+      "work_item": "CCM-CTL-001",
+      "lane": "core",
+      "status": "planned",
+      "optional": false,
+      "dependencies": ["ccm.serve.v1"],
+      "specification": "TODO.md#ccm-ctl-001",
+      "policy_version": 1,
+      "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    },
+    {
+      "id": "ccm.framework-skill.v1",
+      "work_item": "CCM-SKILL-001",
+      "lane": "core",
+      "status": "planned",
+      "optional": false,
+      "dependencies": ["ccm.ctl.v1"],
+      "specification": "TODO.md#ccm-skill-001",
+      "policy_version": 1,
+      "content_scope": ["skills/", "README.md", "SECURITY.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    },
+    {
+      "id": "ccm.daemon-transport.v1",
+      "work_item": "CCM-DAEMON-001",
+      "lane": "optional-daemon",
+      "status": "planned",
+      "optional": true,
+      "dependencies": ["ccm.serve.v1"],
+      "specification": "TODO.md#ccm-daemon-001",
+      "policy_version": 1,
+      "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    },
+    {
+      "id": "ccm.direct-compatibility.v1",
+      "work_item": "CCM-DIRECT-001",
+      "lane": "direct-compatibility",
+      "status": "ready",
+      "optional": false,
+      "dependencies": [],
+      "specification": "TODO.md#ccm-direct-001",
+      "policy_version": 1,
+      "content_scope": ["Cargo.toml", "Cargo.lock", "src/", "tests/", "ARCHITECTURE.md"],
+      "required_checks": ["Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"],
+      "blockers": [],
+      "verification": null
+    }
+  ]
+}

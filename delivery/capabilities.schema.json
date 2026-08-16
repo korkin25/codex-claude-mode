@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/korkin25/codex-claude-mode/delivery/capabilities.schema.json",
+  "title": "codex-claude-mode public capability manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document_type", "schema_version", "repository", "capabilities"],
+  "properties": {
+    "document_type": { "const": "ccm-capability-manifest" },
+    "schema_version": { "const": 1 },
+    "repository": { "const": "https://github.com/korkin25/codex-claude-mode" },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/capability" }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "capabilityId": { "type": "string", "pattern": "^ccm\\.[a-z0-9]+(?:[.-][a-z0-9]+)*\\.v[1-9][0-9]*$" },
+    "workItem": { "type": "string", "pattern": "^CCM-[A-Z]+-[0-9]{3}$" },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "run_id", "url", "head_sha", "status", "required_checks"],
+      "properties": {
+        "provider": { "const": "github-actions" },
+        "run_id": { "type": "string", "pattern": "^[0-9]+$" },
+        "url": { "type": "string", "pattern": "^https://github.com/korkin25/codex-claude-mode/actions/runs/[0-9]+$" },
+        "head_sha": { "$ref": "#/$defs/sha" },
+        "status": { "const": "success" },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["merge_sha", "content_digest", "ci", "verified_at", "provenance"],
+      "properties": {
+        "merge_sha": { "$ref": "#/$defs/sha" },
+        "content_digest": { "$ref": "#/$defs/digest" },
+        "ci": { "$ref": "#/$defs/ci" },
+        "verified_at": { "$ref": "#/$defs/timestamp" },
+        "provenance": { "const": "measured" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "work_item", "lane", "status", "optional", "dependencies", "specification", "policy_version", "content_scope", "required_checks", "blockers", "verification"],
+      "properties": {
+        "id": { "$ref": "#/$defs/capabilityId" },
+        "work_item": { "$ref": "#/$defs/workItem" },
+        "lane": { "enum": ["core", "optional-daemon", "direct-compatibility"] },
+        "status": { "enum": ["planned", "ready", "blocked", "verified"] },
+        "optional": { "type": "boolean" },
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityId" }
+        },
+        "specification": { "type": "string", "pattern": "^(ROADMAP|TODO|ARCHITECTURE)\\.md#" },
+        "policy_version": { "const": 1 },
+        "content_scope": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" }
+        },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "blockers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "verification": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/verification" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "verified" } } },
+          "then": { "properties": { "verification": { "$ref": "#/$defs/verification" } } },
+          "else": { "properties": { "verification": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "blocked" } } },
+          "then": { "properties": { "blockers": { "minItems": 1 } } },
+          "else": { "properties": { "blockers": { "maxItems": 0 } } }
+        }
+      ]
+    }
+  }
+}

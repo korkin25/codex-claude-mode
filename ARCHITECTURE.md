@@ -73,3 +73,12 @@ report.
 
 The implemented transport is the Codex app-server child connection. Unknown
 events and approval kinds fail closed rather than being guessed.
+
+## Delivery contract
+
+The public capability DAG is published in
+[`delivery/capabilities.json`](delivery/capabilities.json). It describes only
+interfaces owned by this repository. A capability being `planned` or `ready`
+does not assert that its runtime exists. `verified` requires immutable merge
+and CI evidence as defined by the public schema; downstream consumers remain
+responsible for checking that evidence independently.
