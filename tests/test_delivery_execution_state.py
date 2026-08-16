@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -12,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/git-config"
 SCRIPT = ROOT / ".agents/skills/ccm-delivery-executor/scripts/inspect_state.py"
+PREFLIGHT = ROOT / ".agents/skills/ccm-delivery-executor/scripts/preflight_inspector.py"
 SPEC = importlib.util.spec_from_file_location("inspect_state", SCRIPT)
 inspector = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -134,6 +136,35 @@ class ExecutionStateTests(unittest.TestCase):
         run_git(self.root, "add", str(path)); run_git(self.root, "commit", "-m", "checkpoint")
         return run_git(self.root, "rev-parse", "HEAD")
 
+    def generation_three(self, *, second_predecessor_id="claim-serve-1"):
+        first_state = self.state()
+        first_head = self.commit_state(first_state)
+        first_claim = copy.deepcopy(self.claim); first_claim["status"] = "released"
+
+        second_claim = copy.deepcopy(self.claim)
+        second_claim.update({"id": "claim-serve-2", "generation": 2})
+        self.claim = second_claim
+        self.controller_head = self.commit_controller([first_claim, second_claim])
+        second_path = Path("delivery/executions/claim-serve-2.json")
+        second_state = self.state(predecessor={"claim_id": second_predecessor_id,
+            "generation": 1, "checkpoint_sha": first_head})
+        second_state["checkpoint"].update({"parent_sha": first_head,
+            "updated_at": "2026-01-01T00:02:00Z"})
+        second_head = self.commit_state(second_state, second_path)
+
+        second_claim["status"] = "revoked"
+        third_claim = copy.deepcopy(second_claim)
+        third_claim.update({"id": "claim-serve-3", "generation": 3, "status": "active"})
+        self.claim = third_claim
+        self.controller_head = self.commit_controller([first_claim, second_claim, third_claim])
+        third_path = Path("delivery/executions/claim-serve-3.json")
+        third_state = self.state(predecessor={"claim_id": "claim-serve-2",
+            "generation": 2, "checkpoint_sha": second_head})
+        third_state["checkpoint"].update({"parent_sha": second_head,
+            "updated_at": "2026-01-01T00:03:00Z"})
+        third_head = self.commit_state(third_state, third_path)
+        return third_state, third_path, third_head, first_claim, second_claim, third_claim
+
     def inspect(self, state, remote_head, *, controller=True, at="2026-08-17T00:00:00Z", path=None,
                 public_main_head=None, predecessor_remote_head=None):
         predecessor_head = state["admission"]["predecessor"]
@@ -173,6 +204,30 @@ class ExecutionStateTests(unittest.TestCase):
     def test_inspector_is_bound_to_external_digest(self):
         state = self.state(inspector_digest="sha256:" + "0" * 64); head = self.commit_state(state)
         self.assertIn("INSPECTOR_EXTERNAL_DIGEST_MISMATCH", self.inspect(state, head)["errors"])
+
+    def test_preflight_executes_authenticated_base_inspector_not_task_tree_copy(self):
+        state = self.state(); head = self.commit_state(state)
+        fixture_script = self.root / ".agents/skills/ccm-delivery-executor/scripts/inspect_state.py"
+        sentinel = self.root.parent / "substituted-inspector-executed"
+        fixture_script.write_text(
+            f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", str(fixture_script.relative_to(self.root)))
+        run_git(self.root, "commit", "-m", "substitute task-tree inspector")
+        substituted_head = run_git(self.root, "rev-parse", "HEAD")
+        digest = inspector.bytes_digest(SCRIPT.read_bytes())
+        command = [sys.executable, str(PREFLIGHT), "--task-root", str(self.root),
+            "--base-sha", self.base, "--inspector-digest", digest, "--", "inspect",
+            "--root", str(self.root), "--state", str(self.state_path),
+            "--at", "2026-08-17T00:00:00Z", "--remote-head", substituted_head,
+            "--public-main-head", self.base, "--inspector-digest", digest,
+            "--controller-root", str(self.controller), "--controller-head", self.controller_head]
+        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertFalse(sentinel.exists(), completed.stdout + completed.stderr)
+        self.assertIn('"admitted": false', completed.stdout)
+        self.assertIn("STATE_NOT_UPDATED_IN_HEAD", completed.stdout)
 
     def test_cli_preserves_lexical_symlink_root(self):
         state = self.state(); head = self.commit_state(state)
@@ -269,6 +324,7 @@ class ExecutionStateTests(unittest.TestCase):
         self.controller_head = self.commit_controller([self.claim, later])
         result = self.inspect(state, head)
         self.assertIn("CONTROLLER_CLAIM_SUPERSEDED", result["errors"])
+        self.assertIn("EXPIRED_CLAIM_TIME_INVALID controller.claim.claim-serve-later", result["errors"])
         self.evidence["content_digest"] = "sha256:" + "f" * 64
         self.controller_head = self.commit_controller([self.claim])
         result = self.inspect(state, head)
@@ -296,7 +352,7 @@ class ExecutionStateTests(unittest.TestCase):
 
     def test_generation_two_explicitly_chains_closed_predecessor(self):
         first = self.state(); predecessor_head = self.commit_state(first)
-        closed = copy.deepcopy(self.claim); closed["status"] = "expired"
+        closed = copy.deepcopy(self.claim); closed["status"] = "released"
         second_claim = copy.deepcopy(self.claim); second_claim.update({"id": "claim-serve-2", "generation": 2})
         self.claim = second_claim
         self.controller_head = self.commit_controller([closed, second_claim])
@@ -312,6 +368,40 @@ class ExecutionStateTests(unittest.TestCase):
         newer = run_git(self.root, "commit-tree", tree, "-p", predecessor_head, "-m", "newer predecessor checkpoint")
         result = self.inspect(second, head, path=second_path, predecessor_remote_head=newer)
         self.assertIn("PREDECESSOR_NOT_LATEST_REMOTE_HEAD", result["errors"])
+
+    def test_generation_three_recursively_binds_all_exact_state_paths(self):
+        state, path, head, *_ = self.generation_three()
+        result = self.inspect(state, head, path=path)
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]), result)
+
+    def test_generation_three_rejects_broken_historical_link(self):
+        state, path, head, *_ = self.generation_three(second_predecessor_id="claim-wrong-1")
+        result = self.inspect(state, head, path=path)
+        self.assertIn("LINEAGE_PREDECESSOR_LINK_MISMATCH 1", result["errors"])
+
+    def test_generation_three_gap_and_fork_fail_end_to_end(self):
+        state, path, head, first, second, third = self.generation_three()
+        self.controller_head = self.commit_controller([first, third])
+        gap = self.inspect(state, head, path=path)
+        self.assertIn("CONTROLLER_CLAIM_HISTORY_INCOMPLETE 2", gap["errors"])
+        sibling = copy.deepcopy(second); sibling["id"] = "claim-serve-2-sibling"
+        self.controller_head = self.commit_controller([first, second, sibling, third])
+        fork = self.inspect(state, head, path=path)
+        self.assertIn("CONTROLLER_CLAIM_GENERATION_FORK 2", fork["errors"])
+
+    def test_invalid_historical_claim_status_enum_fails_end_to_end(self):
+        first = self.state(); first_head = self.commit_state(first)
+        invalid = copy.deepcopy(self.claim); invalid["status"] = "closed"
+        second = copy.deepcopy(self.claim); second.update({"id": "claim-serve-2", "generation": 2})
+        self.claim = second; self.controller_head = self.commit_controller([invalid, second])
+        second_path = Path("delivery/executions/claim-serve-2.json")
+        state = self.state(predecessor={"claim_id": invalid["id"], "generation": 1,
+                                        "checkpoint_sha": first_head})
+        state["checkpoint"].update({"parent_sha": first_head, "updated_at": "2026-01-01T00:02:00Z"})
+        head = self.commit_state(state, second_path)
+        result = self.inspect(state, head, path=second_path)
+        self.assertIn("FORMAT controller.claim.claim-serve-1.status", result["errors"])
+        self.assertIn("CONTROLLER_PREDECESSOR_NOT_TERMINAL 1", result["errors"])
 
     def test_generation_two_rejects_mismatched_predecessor_admission(self):
         first = self.state(); predecessor_head = self.commit_state(first)

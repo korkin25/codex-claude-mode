@@ -67,14 +67,18 @@ than terminal memory, the restart checkpoint.
 ## Recover before writing
 
 On every fresh process or after an abrupt/planned restart, do no implementation
-writes until this command returns `classification: clean` and `admitted: true`:
+writes until the trusted preflight returns `classification: clean` and
+`admitted: true`. Obtain the launcher from a clean externally authenticated
+installation or extract and verify it from the exact admitted base; never run
+the task-tree inspector directly:
 
 ```bash
 env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  PYTHONDONTWRITEBYTECODE=1 python3 \
-  .agents/skills/ccm-delivery-executor/scripts/inspect_state.py inspect \
-  --root . --state delivery/executions/<claim-id>.json \
+  PYTHONDONTWRITEBYTECODE=1 python3 <trusted-preflight-inspector.py> \
+  --task-root <canonical-private-clone> --base-sha <40-hex-SSH-main-head> \
+  --inspector-digest <externally-measured-sha256-digest> -- inspect \
+  --root <canonical-private-clone> --state delivery/executions/<claim-id>.json \
   --at <timezone-aware-RFC3339> --remote-head <40-hex-SSH-branch-head> \
   --public-main-head <40-hex-SSH-main-head> \
   --inspector-digest <externally-measured-sha256-digest> \
@@ -83,18 +87,24 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
   --controller-head <40-hex-SSH-main-head>
 ```
 
-The inspector does not access the network. Execute the inspector whose digest
-was measured from the exact admitted base (prefer a clean checkout of that
-base); the digest is both an external CLI input and an immutable admission
-field. Fetch and measure the task head, public `main`, any predecessor head,
+The launcher and inspector do not access the network. The trusted launcher uses
+bounded trusted Git to extract the inspector blob from the exact admitted base,
+verifies the external digest before starting that Python file, and executes its
+private read-only descriptor in isolated mode. The inspector repeats the
+base/self digest comparison as defense in depth. Fetch and measure the task
+head, public `main`, any predecessor head,
 and the controller head over their canonical SSH remotes with a sanitized Git environment. It verifies
 effective fetch and push URLs and rejects multiple URLs, rewrites, HTTPS,
 state index flags, alternate index/object/replace/namespace/shallow/sparse/path
 state, and state bytes/mode that differ from the exact HEAD blob. Prefetched
 `origin/main`, externally measured public main, and `admission.base_sha` must
 be identical. The complete `base..HEAD` changed-path set must fit the base
-manifest's `content_scope`, except the current and explicitly chained
-predecessor state documents. Every Git
+manifest's `content_scope`, except the exact paths of all fully validated
+lineage state documents. Those states are recursively bound through exact
+predecessor checkpoint SHAs; no directory wildcard is accepted. Every current
+and issuance claim is checked with the central status/type/time/branch/
+capability/evidence semantics, and every predecessor must have a real terminal
+status. Every Git
 probe uses a trusted absolute executable, strict environment allowlist,
 disabled hooks/fsmonitor/external diff/lazy fetch, and time/output bounds; no
 repository-controlled program runs before repository configuration validation.

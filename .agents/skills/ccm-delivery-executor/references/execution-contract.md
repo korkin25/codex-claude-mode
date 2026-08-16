@@ -37,6 +37,15 @@ remain identical, active, unexpired, and unsuperseded. Do
 not substitute a mutable branch name, prose report, local checkout, PR label,
 or CI result for exact object content.
 
+Never start the mutable task-tree inspector directly. Use the trusted preflight
+launcher obtained from an externally authenticated installation or extracted
+and verified from the admitted base. It selects the inspector blob from the
+exact externally supplied base SHA with bounded trusted Git, verifies the
+external SHA-256 digest before interpreter startup, and runs the verified inode
+through a private read-only descriptor in Python isolated mode. The inspector's
+own base-blob and self-digest comparison is an additional defense, not the
+bootstrap trust anchor.
+
 ## State invariants
 
 The tracked state filename is derived from the validated claim ID. It is an
@@ -50,7 +59,13 @@ It contains no authorization payload beyond identifiers and digests.
   work item, owner repository, and exclusive capability set: exactly one claim
   exists for every generation through the current generation. A later claim
   names the unique generation `n-1` claim as its predecessor; sibling claims,
-  generation gaps, forks, or capability-set aliases fail closed.
+  generation gaps, forks, or capability-set aliases fail closed. Every claim
+  in the current and issuance registries is validated against the central
+  claim-schema semantics: exact keys and types, allowed status, ordered
+  timezone-aware issue/expiry times, safe branch, non-empty unique capability
+  IDs, generation, SHA, and evidence-reference formats. Every lineage
+  predecessor is strictly terminal (`released`, `revoked`, or `expired`); an
+  invented status is not closure.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission
   base are equal. Later generations additionally require the named predecessor
   checkpoint to equal its separately measured latest remote head.
@@ -65,8 +80,12 @@ It contains no authorization payload beyond identifiers and digests.
   non-empty required-check list are immutable admission fields. Candidate
   completion equals that acceptance list and contains every required check.
 - Every path changed across the full `base..HEAD` range is covered by the
-  base-bound capability `content_scope`, apart from the current state and its
-  named predecessor state. Governance, skills, CI, `TODO.md`, and the manifest
+  base-bound capability `content_scope`, apart from the exact state path for
+  each fully validated lineage claim ID from generation 1 through `n`. The
+  inspector recursively reads historical states at the exact checkpoint SHAs
+  named by their successors and binds every admission, active-form claim
+  digest, generation, and predecessor link. No `delivery/executions/` wildcard
+  is allowed. Governance, skills, CI, `TODO.md`, and the manifest
   are therefore forbidden unless the immutable base declaration explicitly
   includes them.
 - `remaining_work` and `next_action` describe unfinished work; neither is an

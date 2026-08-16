@@ -47,6 +47,8 @@ CLAIM_KEYS = {
     "capabilities", "generation", "status", "issued_at", "expires_at",
     "dependency_evidence_refs",
 }
+CLAIM_STATUSES = {"active", "released", "revoked", "expired"}
+TERMINAL_CLAIM_STATUSES = {"released", "revoked", "expired"}
 WORK_KEYS = {
     "id", "owner_repository", "capabilities", "status", "dependencies",
     "external_prerequisites", "evidence_refs",
@@ -570,8 +572,44 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
 
 
-def claim_history_errors(claims: dict[str, dict[str, Any]], claim: dict[str, Any],
-                         predecessor: dict[str, Any] | None) -> list[str]:
+def validate_controller_claim(record: dict[str, Any], where: str, errors: list[str],
+                              at: datetime | None = None) -> None:
+    """Mirror the central delivery-schema claim semantics for every registry entry."""
+    strict_object(record, CLAIM_KEYS, where, errors)
+    text(record.get("id"), f"{where}.id", errors, ID_RE)
+    text(record.get("work_item_id"), f"{where}.work_item_id", errors)
+    text(record.get("owner_principal"), f"{where}.owner_principal", errors, ID_RE)
+    text(record.get("repository_id"), f"{where}.repository_id", errors, ID_RE)
+    text(record.get("base_sha"), f"{where}.base_sha", errors, SHA_RE)
+    branch = text(record.get("branch"), f"{where}.branch", errors)
+    if branch is not None and not valid_branch(branch):
+        errors.append(f"INVALID_BRANCH {where}.branch")
+    capabilities = string_list(record.get("capabilities"), f"{where}.capabilities", errors, nonempty=True)
+    for index, capability in enumerate(capabilities):
+        if not ID_RE.fullmatch(capability):
+            errors.append(f"FORMAT {where}.capabilities[{index}]")
+    generation = record.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        errors.append(f"FORMAT {where}.generation")
+    if record.get("status") not in CLAIM_STATUSES:
+        errors.append(f"FORMAT {where}.status")
+    issued = timestamp(record.get("issued_at"), f"{where}.issued_at", errors)
+    expires = timestamp(record.get("expires_at"), f"{where}.expires_at", errors)
+    if issued is not None and expires is not None and issued >= expires:
+        errors.append(f"CLAIM_TIME_ORDER {where}")
+    if at is not None and issued is not None and expires is not None:
+        if record.get("status") == "active" and not issued <= at < expires:
+            errors.append(f"ACTIVE_CLAIM_TIME_INVALID {where}")
+        if record.get("status") == "expired" and at < expires:
+            errors.append(f"EXPIRED_CLAIM_TIME_INVALID {where}")
+    refs = string_list(record.get("dependency_evidence_refs"), f"{where}.dependency_evidence_refs", errors)
+    for index, evidence_ref in enumerate(refs):
+        if not EVIDENCE_RE.fullmatch(evidence_ref):
+            errors.append(f"FORMAT {where}.dependency_evidence_refs[{index}]")
+
+
+def analyze_claim_history(claims: dict[str, dict[str, Any]], claim: dict[str, Any],
+                          predecessor: dict[str, Any] | None) -> tuple[list[str], list[dict[str, Any]]]:
     errors: list[str] = []
     work_item = claim.get("work_item_id")
     repository = claim.get("repository_id")
@@ -612,31 +650,113 @@ def claim_history_errors(claims: dict[str, dict[str, Any]], claim: dict[str, Any
             previous = by_generation.get(current_generation - 1, [])
             if len(previous) == 1 and predecessor.get("claim_id") != previous[0].get("id"):
                 errors.append("PREDECESSOR_CLAIM_ID_MISMATCH")
+        for generation in range(1, current_generation):
+            previous = by_generation.get(generation, [])
+            if len(previous) == 1 and previous[0].get("status") not in TERMINAL_CLAIM_STATUSES:
+                errors.append(f"CONTROLLER_PREDECESSOR_NOT_TERMINAL {generation}")
+    ordered: list[dict[str, Any]] = []
+    if isinstance(current_generation, int) and not isinstance(current_generation, bool):
+        ordered = [by_generation[generation][0] for generation in range(1, current_generation + 1)
+                   if len(by_generation.get(generation, [])) == 1]
+    return errors, ordered
+
+
+def claim_history_errors(claims: dict[str, dict[str, Any]], claim: dict[str, Any],
+                         predecessor: dict[str, Any] | None) -> list[str]:
+    return analyze_claim_history(claims, claim, predecessor)[0]
+
+
+def state_claim_identity_errors(state: dict[str, Any], claim: dict[str, Any],
+                                where: str) -> list[str]:
+    errors: list[str] = []
+    admission = state["admission"]
+    identity = {
+        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
+        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
+        "base_sha": admission["base_sha"], "branch": admission["branch"],
+        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
+        "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
+        "dependency_evidence_refs": admission["dependency_evidence_refs"],
+    }
+    if any(claim.get(key) != value for key, value in identity.items()):
+        errors.append(f"LINEAGE_STATE_CLAIM_IDENTITY_MISMATCH {where}")
+    if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
+        errors.append(f"LINEAGE_STATE_ACTIVE_CLAIM_DIGEST_MISMATCH {where}")
+    return errors
+
+
+def state_at_checkpoint(root: Path, checkpoint: str, claim_id: str,
+                        errors: list[str]) -> dict[str, Any] | None:
+    path = Path("delivery/executions") / f"{claim_id}.json"
+    tree = git(root, "ls-tree", checkpoint, "--", path.as_posix(), check=False)
+    lines = tree.stdout.splitlines()
+    if len(lines) != 1 or not lines[0].startswith("100644 blob "):
+        errors.append(f"LINEAGE_STATE_MODE_OR_ENTRY_MISMATCH {claim_id}")
+        return None
+    state = previous_state(root, checkpoint, path)
+    if state is None:
+        errors.append(f"LINEAGE_STATE_MISSING_OR_INVALID {claim_id}")
+    return state
+
+
+def lineage_state_errors(public_root: Path, state: dict[str, Any],
+                         lineage: list[dict[str, Any]]) -> list[str]:
+    """Bind every generation to its exact state path and recursively named checkpoint."""
+    errors: list[str] = []
+    if not lineage:
+        return ["CONTROLLER_CLAIM_LINEAGE_UNAVAILABLE"]
+    current_generation = state["admission"]["claim_generation"]
+    by_generation = {claim["generation"]: claim for claim in lineage
+                     if isinstance(claim.get("generation"), int)}
+    current_claim = by_generation.get(current_generation)
+    if current_claim is None:
+        return ["CONTROLLER_CURRENT_CLAIM_GENERATION_MISSING"]
+    errors.extend(state_claim_identity_errors(state, current_claim, f"generation-{current_generation}"))
+    child_state = state
+    for generation in range(current_generation - 1, 0, -1):
+        link = child_state["admission"].get("predecessor")
+        claim = by_generation.get(generation)
+        if claim is None or not isinstance(link, dict):
+            errors.append(f"LINEAGE_PREDECESSOR_LINK_MISSING {generation}")
+            break
+        if link.get("claim_id") != claim.get("id") or link.get("generation") != generation:
+            errors.append(f"LINEAGE_PREDECESSOR_LINK_MISMATCH {generation}")
+            break
+        previous = state_at_checkpoint(public_root, link.get("checkpoint_sha", ""), claim["id"], errors)
+        if previous is None:
+            break
+        errors.extend(state_claim_identity_errors(previous, claim, f"generation-{generation}"))
+        errors.extend(append_only_errors(previous, child_state))
+        child_state = previous
+    if current_generation == 1:
+        child_state = state
+    if child_state["admission"].get("claim_generation") == 1 and child_state["admission"].get("predecessor") is not None:
+        errors.append("LINEAGE_GENERATION_ONE_HAS_PREDECESSOR")
     return errors
 
 
 def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime,
-                      public_root: Path) -> tuple[list[str], bool]:
+                      public_root: Path) -> tuple[list[str], bool, list[str]]:
     errors = repository_guard(root, "ccm-multi")
     unavailable = False
-    if errors: return errors, True
+    if errors: return errors, True, []
     errors.extend(remote_errors(root, CONTROLLER_REMOTE))
     admission = state["admission"]
     if not SHA_RE.fullmatch(head) or git(root, "cat-file", "-e", f"{head}^{{commit}}", check=False).returncode:
-        return errors + ["CONTROLLER_HEAD_UNAVAILABLE"], True
+        return errors + ["CONTROLLER_HEAD_UNAVAILABLE"], True, []
     remote_main = git(root, "rev-parse", "refs/remotes/origin/main", check=False)
     if remote_main.returncode or remote_main.stdout.strip() != head:
-        return errors + ["CONTROLLER_PREFETCHED_ORIGIN_MAIN_MISMATCH"], True
+        return errors + ["CONTROLLER_PREFETCHED_ORIGIN_MAIN_MISMATCH"], True, []
     issuance = admission["controller_commit_sha"]
     if git(root, "cat-file", "-e", f"{issuance}^{{commit}}", check=False).returncode:
-        return errors + ["CONTROLLER_ISSUANCE_UNAVAILABLE"], True
+        return errors + ["CONTROLLER_ISSUANCE_UNAVAILABLE"], True, []
     if not is_ancestor(root, issuance, head): errors.append("CONTROLLER_ISSUANCE_NOT_ANCESTOR")
     docs: dict[str, dict[str, Any]] = {}
     for name in ("claims.json", "state.json", "evidence.json"):
         docs[name] = git_json(root, head, f"product/delivery/{name}", errors)
     issuance_claims = git_json(root, issuance, "product/delivery/claims.json", errors)
     if any(not doc for doc in (*docs.values(), issuance_claims)):
-        return errors, True
+        return errors, True, []
     if strict_object(docs["claims.json"], {"document_type", "schema_version", "claims"}, "controller.claims", errors).get("document_type") != "claims-registry": errors.append("CONTROLLER_CLAIMS_TYPE")
     if strict_object(docs["state.json"], {"document_type", "schema_version", "repositories", "capabilities", "external_capabilities", "work_items"}, "controller.state", errors).get("document_type") != "delivery-state": errors.append("CONTROLLER_STATE_TYPE")
     if strict_object(docs["evidence.json"], {"document_type", "schema_version", "evidence"}, "controller.evidence", errors).get("document_type") != "evidence-registry": errors.append("CONTROLLER_EVIDENCE_TYPE")
@@ -650,14 +770,16 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
     externals = unique_index(docs["state.json"].get("external_capabilities"), "controller.external_capabilities", errors)
     evidence = unique_index(docs["evidence.json"].get("evidence"), "controller.evidence", errors)
     for registered_id, registered_claim in claims.items():
-        strict_object(registered_claim, CLAIM_KEYS, f"controller.claim.{registered_id}", errors)
+        validate_controller_claim(registered_claim, f"controller.claim.{registered_id}", errors, at)
+    for registered_id, registered_claim in old_claims.items():
+        validate_controller_claim(registered_claim, f"controller.issuance_claim.{registered_id}", errors)
     claim_id = admission["claim_id"]
     claim, issued_claim = claims.get(claim_id), old_claims.get(claim_id)
     if claim is None or issued_claim is None:
         errors.append("CONTROLLER_CLAIM_MISSING")
-        return errors, False
-    strict_object(claim, CLAIM_KEYS, f"controller.claim.{claim_id}", errors)
-    errors.extend(claim_history_errors(claims, claim, admission["predecessor"]))
+        return errors, False, []
+    history_errors, lineage = analyze_claim_history(claims, claim, admission["predecessor"])
+    errors.extend(history_errors)
     if claim != issued_claim: errors.append("CONTROLLER_CLAIM_REVOKED_OR_CHANGED")
     if canonical_digest(claim) != admission["claim_digest"]: errors.append("CLAIM_DIGEST_MISMATCH")
     expected = {
@@ -724,7 +846,7 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         previous_claim = claims.get(predecessor["claim_id"])
         if previous_claim is None or previous_claim.get("generation") != predecessor["generation"]:
             errors.append("PREDECESSOR_CLAIM_MISSING")
-        elif previous_claim.get("status") == "active" or previous_claim.get("work_item_id") != claim.get("work_item_id") or previous_claim.get("repository_id") != "ccm-public":
+        elif previous_claim.get("status") not in TERMINAL_CLAIM_STATUSES or previous_claim.get("work_item_id") != claim.get("work_item_id") or previous_claim.get("repository_id") != "ccm-public":
             errors.append("PREDECESSOR_CLAIM_NOT_CLOSED_OR_MISMATCHED")
         else:
             predecessor_path = Path("delivery/executions") / f"{predecessor['claim_id']}.json"
@@ -744,7 +866,8 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
                 active_identity = {**identity, "status": "active"}
                 if canonical_digest(active_identity) != prior_admission["claim_digest"]:
                     errors.append("PREDECESSOR_ACTIVE_CLAIM_DIGEST_MISMATCH")
-    return errors, unavailable
+    errors.extend(lineage_state_errors(public_root, state, lineage))
+    return errors, unavailable, [claim["id"] for claim in lineage]
 
 
 def previous_state(root: Path, revision: str, path: Path) -> dict[str, Any] | None:
@@ -815,7 +938,8 @@ def scope_allows(path: str, scopes: list[str], state_paths: set[str]) -> bool:
 
 
 def public_contract_errors(root: Path, head: str, state_path: Path, state: dict[str, Any],
-                           inspector_digest: str) -> list[str]:
+                           inspector_digest: str,
+                           lineage_claim_ids: list[str] | None = None) -> list[str]:
     errors: list[str] = []
     admission = state["admission"]
     base = admission["base_sha"]
@@ -853,8 +977,8 @@ def public_contract_errors(root: Path, head: str, state_path: Path, state: dict[
     }
     if canonical_digest(contract) != admission["contract_digest"]: errors.append("CONTRACT_DIGEST_MISMATCH")
     state_paths = {state_path.as_posix()}
-    if admission["predecessor"]:
-        state_paths.add(f"delivery/executions/{admission['predecessor']['claim_id']}.json")
+    for claim_id in lineage_claim_ids or []:
+        state_paths.add(f"delivery/executions/{claim_id}.json")
     changed = git_bytes(root, "diff", "--no-renames", "--name-only", "-z", base, head)
     if changed.returncode:
         errors.append("CHANGED_PATHS_UNAVAILABLE")
@@ -992,10 +1116,6 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
         result["classification"] = "stale"; result["errors"].extend(stale); return result
     if dirty:
         result["classification"] = "dirty"; result["errors"].append("WORKTREE_DIRTY"); return result
-    contract_errors = public_contract_errors(root, head, state_path, state, inspector_digest)
-    if contract_errors:
-        result["errors"].extend(contract_errors)
-        return result
     if controller_root is None or controller_head is None:
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_SNAPSHOT_REQUIRED"); return result
     if not controller_root.is_dir():
@@ -1009,10 +1129,18 @@ def inspect(root: Path, state_path: Path, state: dict[str, Any], at: datetime, r
     if (controller_root != canonical_controller_lexical or supplied_controller != controller_root
             or supplied_controller != canonical_controller):
         result["classification"] = "local_only"; result["errors"].append("CONTROLLER_ROOT_NONCANONICAL"); return result
-    control_errors, unavailable = controller_errors(controller_root, controller_head, state, at, root)
+    control_errors, unavailable, lineage_claim_ids = controller_errors(
+        controller_root, controller_head, state, at, root
+    )
     if control_errors:
         result["classification"] = "local_only" if unavailable else "invalid"
         result["errors"].extend(control_errors)
+        return result
+    contract_errors = public_contract_errors(
+        root, head, state_path, state, inspector_digest, lineage_claim_ids
+    )
+    if contract_errors:
+        result["errors"].extend(contract_errors)
         return result
     result["classification"], result["admitted"] = "clean", True
     return result
