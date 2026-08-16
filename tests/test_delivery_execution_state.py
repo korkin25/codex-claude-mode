@@ -326,6 +326,38 @@ class ExecutionStateTests(unittest.TestCase):
         result = self.inspect(second, head, path=second_path)
         self.assertIn("PREDECESSOR_ADMISSION_IDENTITY_MISMATCH", result["errors"])
 
+    def test_controller_rejects_same_generation_claim_fork_end_to_end(self):
+        sibling = copy.deepcopy(self.claim)
+        sibling.update({"id": "claim-serve-sibling", "status": "expired"})
+        self.controller_head = self.commit_controller([self.claim, sibling])
+        state = self.state(); head = self.commit_state(state)
+        result = self.inspect(state, head)
+        self.assertIn("CONTROLLER_CLAIM_GENERATION_FORK 1", result["errors"])
+
+    def test_claim_history_requires_complete_unique_chain_and_exact_predecessor(self):
+        first = copy.deepcopy(self.claim); first["status"] = "expired"
+        second = copy.deepcopy(self.claim); second.update({"id": "claim-serve-2", "generation": 2,
+                                                            "status": "expired"})
+        third = copy.deepcopy(self.claim); third.update({"id": "claim-serve-3", "generation": 3})
+        indexed = {item["id"]: item for item in (first, second, third)}
+        self.assertEqual([], inspector.claim_history_errors(
+            indexed, third, {"claim_id": second["id"], "generation": 2, "checkpoint_sha": "a" * 40}))
+        wrong = inspector.claim_history_errors(
+            indexed, third, {"claim_id": first["id"], "generation": 2, "checkpoint_sha": "a" * 40})
+        self.assertIn("PREDECESSOR_CLAIM_ID_MISMATCH", wrong)
+        gap = inspector.claim_history_errors(
+            {first["id"]: first, third["id"]: third}, third,
+            {"claim_id": first["id"], "generation": 2, "checkpoint_sha": "a" * 40})
+        self.assertIn("CONTROLLER_CLAIM_HISTORY_INCOMPLETE 2", gap)
+
+    def test_controller_rejects_capability_alias_in_claim_lineage(self):
+        alias = copy.deepcopy(self.claim)
+        alias.update({"id": "claim-serve-alias", "capabilities": ["ccm.other"], "status": "expired"})
+        self.controller_head = self.commit_controller([self.claim, alias])
+        state = self.state(); head = self.commit_state(state)
+        result = self.inspect(state, head)
+        self.assertIn("CONTROLLER_CLAIM_LINEAGE_CAPABILITIES_MISMATCH claim-serve-alias", result["errors"])
+
     def test_timestamps_and_append_only_history_are_enforced(self):
         first = self.state(); first["execution"]["completed_acceptance"] = self.acceptance
         first_head = self.commit_state(first)

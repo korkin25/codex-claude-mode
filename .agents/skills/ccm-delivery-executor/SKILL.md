@@ -22,7 +22,7 @@ input, not standing authority or permission to merge.
    SSH `main` head and validate the claim there again; its issuance snapshot
    cannot hide later revocation or supersession.
 4. Fetch only through the canonical SSH remote. Require a clean isolated
-   worktree/clone whose `main` and remote `main` equal the claim base. Never use
+   private clone whose `main` and remote `main` equal the claim base. Never use
    Git HTTPS or a credential store.
    Use the resolved sibling `ccm-multi` checkout as controller source; require
    its prefetched `origin/main` to equal the separately measured controller

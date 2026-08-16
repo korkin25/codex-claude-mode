@@ -570,6 +570,51 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
 
 
+def claim_history_errors(claims: dict[str, dict[str, Any]], claim: dict[str, Any],
+                         predecessor: dict[str, Any] | None) -> list[str]:
+    errors: list[str] = []
+    work_item = claim.get("work_item_id")
+    repository = claim.get("repository_id")
+    capabilities = claim.get("capabilities")
+    capability_set = (frozenset(capabilities) if isinstance(capabilities, list)
+                      and all(isinstance(item, str) for item in capabilities) else frozenset())
+    same_owner = [item for item in claims.values()
+                  if item.get("work_item_id") == work_item and item.get("repository_id") == repository]
+    lineage: list[dict[str, Any]] = []
+    for item in same_owner:
+        item_capabilities = item.get("capabilities")
+        if (not isinstance(item_capabilities, list)
+                or not all(isinstance(value, str) for value in item_capabilities)
+                or len(item_capabilities) != len(set(item_capabilities))
+                or frozenset(item_capabilities) != capability_set):
+            errors.append(f"CONTROLLER_CLAIM_LINEAGE_CAPABILITIES_MISMATCH {item.get('id', '<unknown>')}")
+        else:
+            lineage.append(item)
+    by_generation: dict[int, list[dict[str, Any]]] = {}
+    for item in lineage:
+        generation = item.get("generation")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            errors.append(f"CONTROLLER_CLAIM_HISTORY_GENERATION_INVALID {item.get('id', '<unknown>')}")
+            continue
+        by_generation.setdefault(generation, []).append(item)
+    for generation, items in sorted(by_generation.items()):
+        if len(items) != 1:
+            errors.append(f"CONTROLLER_CLAIM_GENERATION_FORK {generation}")
+    current_generation = claim.get("generation")
+    if isinstance(current_generation, int) and not isinstance(current_generation, bool) and current_generation >= 1:
+        for generation in range(1, current_generation + 1):
+            if len(by_generation.get(generation, [])) != 1:
+                errors.append(f"CONTROLLER_CLAIM_HISTORY_INCOMPLETE {generation}")
+        current = by_generation.get(current_generation, [])
+        if len(current) == 1 and current[0].get("id") != claim.get("id"):
+            errors.append("CONTROLLER_CURRENT_CLAIM_GENERATION_MISMATCH")
+        if current_generation > 1 and predecessor is not None:
+            previous = by_generation.get(current_generation - 1, [])
+            if len(previous) == 1 and predecessor.get("claim_id") != previous[0].get("id"):
+                errors.append("PREDECESSOR_CLAIM_ID_MISMATCH")
+    return errors
+
+
 def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime,
                       public_root: Path) -> tuple[list[str], bool]:
     errors = repository_guard(root, "ccm-multi")
@@ -604,12 +649,15 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
     work_items = unique_index(docs["state.json"].get("work_items"), "controller.work_items", errors)
     externals = unique_index(docs["state.json"].get("external_capabilities"), "controller.external_capabilities", errors)
     evidence = unique_index(docs["evidence.json"].get("evidence"), "controller.evidence", errors)
+    for registered_id, registered_claim in claims.items():
+        strict_object(registered_claim, CLAIM_KEYS, f"controller.claim.{registered_id}", errors)
     claim_id = admission["claim_id"]
     claim, issued_claim = claims.get(claim_id), old_claims.get(claim_id)
     if claim is None or issued_claim is None:
         errors.append("CONTROLLER_CLAIM_MISSING")
         return errors, False
     strict_object(claim, CLAIM_KEYS, f"controller.claim.{claim_id}", errors)
+    errors.extend(claim_history_errors(claims, claim, admission["predecessor"]))
     if claim != issued_claim: errors.append("CONTROLLER_CLAIM_REVOKED_OR_CHANGED")
     if canonical_digest(claim) != admission["claim_digest"]: errors.append("CLAIM_DIGEST_MISMATCH")
     expected = {

@@ -46,6 +46,11 @@ It contains no authorization payload beyond identifiers and digests.
 - One document represents one claim generation and one branch. Generation 1
   begins at the exact public base; later generations explicitly chain to the
   immediately preceding closed claim and pushed checkpoint SHA.
+- The current controller registry contains one complete lineage for the same
+  work item, owner repository, and exclusive capability set: exactly one claim
+  exists for every generation through the current generation. A later claim
+  names the unique generation `n-1` claim as its predecessor; sibling claims,
+  generation gaps, forks, or capability-set aliases fail closed.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission
   base are equal. Later generations additionally require the named predecessor
   checkpoint to equal its separately measured latest remote head.
