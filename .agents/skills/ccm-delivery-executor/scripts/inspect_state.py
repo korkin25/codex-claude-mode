@@ -674,8 +674,8 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
     work_items = unique_index(state_doc.get("work_items"), f"{label}.work_items", errors)
     evidence = unique_index(evidence_doc.get("evidence"), f"{label}.evidence", errors)
     claims = unique_index(claims_doc.get("claims"), f"{label}.claims", errors)
-    if len(repositories) < 3:
-        errors.append(f"CONTROLLER_REPOSITORIES_INCOMPLETE {label}")
+    if set(repositories) != set(REPOSITORY_WEB):
+        errors.append(f"CONTROLLER_REPOSITORIES_MISMATCH {label}")
     if not capabilities:
         errors.append(f"CONTROLLER_CAPABILITIES_EMPTY {label}")
 
@@ -696,8 +696,8 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         owner = text(capability.get("owner_repository"), f"{where}.owner_repository", errors, ID_RE)
         if owner not in repositories:
             errors.append(f"CONTROLLER_CAPABILITY_OWNER_MISSING {where}")
-        if not isinstance(capability.get("write_exclusive"), bool):
-            errors.append(f"TYPE {where}.write_exclusive: expected boolean")
+        if capability.get("write_exclusive") is not True:
+            errors.append(f"CONTROLLER_CAPABILITY_NOT_EXCLUSIVE {where}")
         text(capability.get("scope"), f"{where}.scope", errors)
 
     for evidence_id, record in evidence.items():
@@ -716,6 +716,8 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         for evidence_id in refs:
             if not EVIDENCE_RE.fullmatch(evidence_id) or evidence_id not in evidence:
                 errors.append(f"CONTROLLER_EVIDENCE_REF_MISSING {where} {evidence_id}")
+        if external.get("state") == "available" and not refs:
+            errors.append(f"CONTROLLER_EXTERNAL_EVIDENCE_MISSING {where}")
         string_list(external.get("blocks"), f"{where}.blocks", errors)
 
     for work_id, work in work_items.items():
@@ -737,11 +739,27 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
                 errors.append(f"CONTROLLER_WORK_CAPABILITY_OWNER_MISMATCH {where} {capability_id}")
         if work.get("status") not in WORK_STATUSES:
             errors.append(f"CONTROLLER_WORK_STATUS {where}")
-        for evidence_id in string_list(work.get("evidence_refs"), f"{where}.evidence_refs", errors):
+        work_evidence = string_list(work.get("evidence_refs"), f"{where}.evidence_refs", errors)
+        for evidence_id in work_evidence:
             if evidence_id not in evidence:
                 errors.append(f"CONTROLLER_EVIDENCE_REF_MISSING {where} {evidence_id}")
+        if work.get("status") == "done" and not work_evidence:
+            errors.append(f"CONTROLLER_DONE_WORK_EVIDENCE_MISSING {where}")
         # Resolve every reference even for non-ready work; terminal/unrelated claims cannot hide bad IDs.
         required_evidence_refs(work, work_items, externals, where, errors)
+        if work.get("status") == "ready":
+            dependencies = work.get("dependencies")
+            unfinished = [dependency_id for dependency_id in dependencies
+                          if isinstance(dependency_id, str)
+                          and work_items.get(dependency_id, {}).get("status") != "done"] \
+                if isinstance(dependencies, list) else []
+            external_refs = work.get("external_prerequisites")
+            unavailable = [external_id for external_id in external_refs
+                           if isinstance(external_id, str)
+                           and externals.get(external_id, {}).get("state") != "available"] \
+                if isinstance(external_refs, list) else []
+            if unfinished or unavailable:
+                errors.append(f"CONTROLLER_WORK_NOT_READY {where}")
 
     for claim_id, claim in claims.items():
         where = f"{label}.claim.{claim_id}"
@@ -801,6 +819,94 @@ def load_controller_snapshot(root: Path, revision: str, at: datetime, label: str
     return validate_controller_snapshot(documents, at, label, errors, claims_at=claims_at)
 
 
+def issuance_prerequisite_errors(snapshot: dict[str, Any], claim: dict[str, Any],
+                                 where: str) -> list[str]:
+    """Prove that a claim was eligible using only its immutable issuance snapshot."""
+    errors: list[str] = []
+    work = snapshot["work_items"].get(claim.get("work_item_id"))
+    if work is None:
+        return [f"CONTROLLER_ISSUANCE_WORK_MISSING {where}"]
+    if work.get("status") != "ready":
+        errors.append(f"CONTROLLER_ISSUANCE_WORK_NOT_READY {where}")
+    if work.get("owner_repository") != claim.get("repository_id"):
+        errors.append(f"CONTROLLER_ISSUANCE_WORK_OWNER_MISMATCH {where}")
+    if work.get("capabilities") != claim.get("capabilities"):
+        errors.append(f"CONTROLLER_ISSUANCE_WORK_CAPABILITIES_MISMATCH {where}")
+
+    required: set[str] = set()
+    evidence = snapshot["evidence"]
+    dependencies = work.get("dependencies")
+    for dependency_id in dependencies if isinstance(dependencies, list) else []:
+        if not isinstance(dependency_id, str):
+            continue
+        dependency = snapshot["work_items"].get(dependency_id)
+        if dependency is None:
+            errors.append(f"CONTROLLER_ISSUANCE_DEPENDENCY_MISSING {where} {dependency_id}")
+            continue
+        if dependency.get("status") != "done":
+            errors.append(f"CONTROLLER_ISSUANCE_DEPENDENCY_NOT_DONE {where} {dependency_id}")
+        dependency_owner = dependency.get("owner_repository")
+        dependency_refs = dependency.get("evidence_refs")
+        for evidence_id in dependency_refs if isinstance(dependency_refs, list) else []:
+            if not isinstance(evidence_id, str):
+                continue
+            required.add(evidence_id)
+            record = evidence.get(evidence_id)
+            if record is None:
+                continue
+            if record.get("repository_id") != dependency_owner:
+                errors.append(
+                    f"CONTROLLER_ISSUANCE_DEPENDENCY_EVIDENCE_OWNER_MISMATCH "
+                    f"{where} {dependency_id} {evidence_id}"
+                )
+            if record.get("kind") != "merge_ci":
+                errors.append(
+                    f"CONTROLLER_ISSUANCE_DEPENDENCY_EVIDENCE_TYPE_MISMATCH "
+                    f"{where} {dependency_id} {evidence_id}"
+                )
+
+    external_prerequisites = work.get("external_prerequisites")
+    for external_id in external_prerequisites if isinstance(external_prerequisites, list) else []:
+        if not isinstance(external_id, str):
+            continue
+        external = snapshot["externals"].get(external_id)
+        if external is None:
+            errors.append(f"CONTROLLER_ISSUANCE_EXTERNAL_MISSING {where} {external_id}")
+            continue
+        if external.get("state") != "available":
+            errors.append(f"CONTROLLER_ISSUANCE_EXTERNAL_UNAVAILABLE {where} {external_id}")
+        # The external capability's exact evidence_refs are the central contract's explicit
+        # cross-owner relation. Do not infer an owner from its ID or blocks list.
+        external_refs = external.get("evidence_refs")
+        for evidence_id in external_refs if isinstance(external_refs, list) else []:
+            if not isinstance(evidence_id, str):
+                continue
+            required.add(evidence_id)
+            record = evidence.get(evidence_id)
+            if record is not None and record.get("kind") not in {"merge_ci", "external_probe"}:
+                errors.append(
+                    f"CONTROLLER_ISSUANCE_EXTERNAL_EVIDENCE_TYPE_MISMATCH "
+                    f"{where} {external_id} {evidence_id}"
+                )
+
+    raw_claim_refs = claim.get("dependency_evidence_refs")
+    claim_refs = ({item for item in raw_claim_refs if isinstance(item, str)}
+                  if isinstance(raw_claim_refs, list) else set())
+    if required != claim_refs:
+        errors.append(f"CONTROLLER_ISSUANCE_REQUIRED_EVIDENCE_SET_MISMATCH {where}")
+    issued = timestamp(claim.get("issued_at"), f"{where}.claim.issued_at", errors)
+    for evidence_id in claim_refs:
+        record = evidence.get(evidence_id)
+        if record is None:
+            continue
+        verified = timestamp(
+            record.get("verified_at"), f"{where}.evidence.{evidence_id}.verified_at", errors
+        )
+        if issued is not None and verified is not None and verified > issued:
+            errors.append(f"CONTROLLER_ISSUANCE_EVIDENCE_AFTER_CLAIM {where} {evidence_id}")
+    return errors
+
+
 def admission_snapshot_errors(controller_root: Path, controller_head: str, public_root: Path,
                               state: dict[str, Any], at: datetime, where: str) -> list[str]:
     """Authenticate one execution state against its own immutable issuance snapshot."""
@@ -831,6 +937,7 @@ def admission_snapshot_errors(controller_root: Path, controller_head: str, publi
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_BINDING_MISMATCH {where}")
     if canonical_digest(claim) != admission["claim_digest"]:
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_DIGEST_MISMATCH {where}")
+    errors.extend(issuance_prerequisite_errors(snapshot, claim, where))
     bindings = {item["id"]: item["digest"] for item in admission["dependency_evidence"]}
     for evidence_id in admission["dependency_evidence_refs"]:
         record = snapshot["evidence"].get(evidence_id)

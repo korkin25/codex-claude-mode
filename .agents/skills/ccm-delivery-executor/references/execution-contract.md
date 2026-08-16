@@ -69,9 +69,16 @@ It contains no authorization payload beyond identifiers and digests.
   `admission.controller_commit_sha`. Repository, work-item, capability,
   dependency, external-prerequisite, and evidence references must all resolve
   within that same snapshot; claim capabilities are an owner-matching subset
-  of the work item's capabilities. Historical evidence objects and their
-  canonical digests are checked at their issuance snapshot, never filled from a
-  later registry. Every lineage
+  of the work item's capabilities. At issuance the work item is already
+  `ready`, every dependency is `done`, and every external prerequisite is
+  `available`. Dependency evidence is `merge_ci` evidence from the dependency
+  work item's owner repository. An external capability's exact
+  `evidence_refs` are the only normative representation of a cross-owner
+  evidence relation; owner relationships are never inferred from an ID or
+  prose. Evidence `verified_at` is no later than claim `issued_at`, and the
+  claim/state issue, expiry, and checkpoint ordering remains valid. Historical
+  evidence objects and their canonical digests are checked at their issuance
+  snapshot, never filled from a later registry. Every lineage
   predecessor is strictly terminal (`released`, `revoked`, or `expired`); an
   invented status is not closure.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission

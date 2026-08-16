@@ -390,6 +390,62 @@ class ExecutionStateTests(unittest.TestCase):
             result["errors"],
         )
 
+    def test_blocked_issuance_cannot_be_retroactively_made_ready(self):
+        def blocked_at_issuance(documents):
+            work_items = documents["state.json"]["work_items"]
+            next(item for item in work_items if item["id"] == "CCM-SERVE-001")["status"] = "blocked"
+            next(item for item in work_items if item["id"] == "CCM-REMOTE-CTL-001")["status"] = "blocked"
+
+        self.controller_head = self.commit_controller([self.claim], blocked_at_issuance)
+        state = self.state()
+        head = self.commit_state(state)
+        self.controller_head = self.commit_controller([self.claim])
+
+        result = self.inspect(state, head)
+        self.assertIn("CONTROLLER_ISSUANCE_WORK_NOT_READY generation-1", result["errors"])
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_DEPENDENCY_NOT_DONE generation-1 CCM-REMOTE-CTL-001",
+            result["errors"],
+        )
+
+    def test_evidence_verified_after_claim_issuance_is_rejected(self):
+        self.evidence["verified_at"] = "2026-01-01T00:00:01Z"
+        self.controller_head = self.commit_controller([self.claim])
+        state = self.state()
+        head = self.commit_state(state)
+
+        result = self.inspect(state, head)
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_EVIDENCE_AFTER_CLAIM generation-1 evidence-dependency",
+            result["errors"],
+        )
+
+    def test_dependency_evidence_owner_and_type_are_bound_at_issuance(self):
+        self.evidence["kind"] = "external_probe"
+
+        def wrong_dependency_owner(documents):
+            dependency = next(
+                item for item in documents["state.json"]["work_items"]
+                if item["id"] == "CCM-REMOTE-CTL-001"
+            )
+            dependency["owner_repository"] = "aor"
+
+        self.controller_head = self.commit_controller([self.claim], wrong_dependency_owner)
+        state = self.state()
+        head = self.commit_state(state)
+
+        result = self.inspect(state, head)
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_DEPENDENCY_EVIDENCE_OWNER_MISMATCH "
+            "generation-1 CCM-REMOTE-CTL-001 evidence-dependency",
+            result["errors"],
+        )
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_DEPENDENCY_EVIDENCE_TYPE_MISMATCH "
+            "generation-1 CCM-REMOTE-CTL-001 evidence-dependency",
+            result["errors"],
+        )
+
     def test_controller_duplicate_json_is_local_only(self):
         state = self.state(); head = self.commit_state(state)
         path = self.controller / "product/delivery/claims.json"

@@ -108,8 +108,14 @@ every lineage state, all three governance registries (`claims.json`,
 claim, including unrelated terminal claims, must resolve a real repository and
 work item, use only capabilities owned by that repository and contained in the
 work item, and reference valid evidence present in that same immutable
-snapshot. Each state's evidence digests are checked against its own issuance
-snapshot, so evidence added later cannot authorize an earlier claim. Every
+snapshot. The claimed work must already be `ready`, its dependencies `done`,
+and its external prerequisites `available` in the issuance snapshot. Dependency
+evidence must be `merge_ci` evidence owned by the dependency repository;
+external cross-owner evidence is accepted only through that external
+capability's explicit `evidence_refs`. Every evidence record must have been
+verified no later than the claim's `issued_at`. Each state's evidence digests
+are checked against its own issuance snapshot, so later readiness or evidence
+cannot authorize an earlier claim. Every
 predecessor must have a real terminal status. Every Git
 probe uses a trusted absolute executable, strict environment allowlist,
 disabled hooks/fsmonitor/external diff/lazy fetch, and time/output bounds; no
