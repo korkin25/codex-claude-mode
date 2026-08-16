@@ -63,7 +63,15 @@ It contains no authorization payload beyond identifiers and digests.
   in the current and issuance registries is validated against the central
   claim-schema semantics: exact keys and types, allowed status, ordered
   timezone-aware issue/expiry times, safe branch, non-empty unique capability
-  IDs, generation, SHA, and evidence-reference formats. Every lineage
+  IDs, generation, SHA, and evidence-reference formats. The inspector loads and
+  strictly validates `claims.json`, `state.json`, and `evidence.json` both at
+  the current controller head and at each lineage state's exact
+  `admission.controller_commit_sha`. Repository, work-item, capability,
+  dependency, external-prerequisite, and evidence references must all resolve
+  within that same snapshot; claim capabilities are an owner-matching subset
+  of the work item's capabilities. Historical evidence objects and their
+  canonical digests are checked at their issuance snapshot, never filled from a
+  later registry. Every lineage
   predecessor is strictly terminal (`released`, `revoked`, or `expired`); an
   invented status is not closure.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission
@@ -83,8 +91,10 @@ It contains no authorization payload beyond identifiers and digests.
   base-bound capability `content_scope`, apart from the exact state path for
   each fully validated lineage claim ID from generation 1 through `n`. The
   inspector recursively reads historical states at the exact checkpoint SHAs
-  named by their successors and binds every admission, active-form claim
-  digest, generation, and predecessor link. No `delivery/executions/` wildcard
+  named by their successors, proves every recorded controller commit is
+  available and ancestral to the externally measured controller head, and
+  binds every admission, active-form claim/evidence digest, generation, and
+  predecessor link. No `delivery/executions/` wildcard
   is allowed. Governance, skills, CI, `TODO.md`, and the manifest
   are therefore forbidden unless the immutable base declaration explicitly
   includes them.

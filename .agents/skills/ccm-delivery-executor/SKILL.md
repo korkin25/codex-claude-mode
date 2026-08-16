@@ -101,10 +101,16 @@ state, and state bytes/mode that differ from the exact HEAD blob. Prefetched
 be identical. The complete `base..HEAD` changed-path set must fit the base
 manifest's `content_scope`, except the exact paths of all fully validated
 lineage state documents. Those states are recursively bound through exact
-predecessor checkpoint SHAs; no directory wildcard is accepted. Every current
-and issuance claim is checked with the central status/type/time/branch/
-capability/evidence semantics, and every predecessor must have a real terminal
-status. Every Git
+predecessor checkpoint SHAs; no directory wildcard is accepted. At the current
+controller head and at the exact `admission.controller_commit_sha` recorded by
+every lineage state, all three governance registries (`claims.json`,
+`state.json`, and `evidence.json`) are loaded and strictly validated. Every
+claim, including unrelated terminal claims, must resolve a real repository and
+work item, use only capabilities owned by that repository and contained in the
+work item, and reference valid evidence present in that same immutable
+snapshot. Each state's evidence digests are checked against its own issuance
+snapshot, so evidence added later cannot authorize an earlier claim. Every
+predecessor must have a real terminal status. Every Git
 probe uses a trusted absolute executable, strict environment allowlist,
 disabled hooks/fsmonitor/external diff/lazy fetch, and time/output bounds; no
 repository-controlled program runs before repository configuration validation.

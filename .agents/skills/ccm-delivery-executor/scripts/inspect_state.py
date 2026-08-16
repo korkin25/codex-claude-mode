@@ -53,6 +53,8 @@ WORK_KEYS = {
     "id", "owner_repository", "capabilities", "status", "dependencies",
     "external_prerequisites", "evidence_refs",
 }
+CONTROLLER_REPOSITORY_KEYS = {"id", "role", "url", "baseline_sha"}
+CAPABILITY_KEYS = {"id", "owner_repository", "write_exclusive", "scope"}
 EXTERNAL_KEYS = {"id", "state", "evidence_refs", "blocks"}
 EVIDENCE_KEYS = {
     "id", "kind", "repository_id", "merge_sha", "content_digest", "ci",
@@ -81,6 +83,9 @@ CHECK_CONTRACT = {
     "ccm-public": ("delivery/capabilities.json", "ccm-capability-manifest-v1"),
     "aor": (".delivery/capabilities.json", "aor-capability-manifest-v1"),
 }
+REPOSITORY_ROLES = {"public_client", "authoritative_runtime", "product_integration"}
+WORK_STATUSES = {"planned", "ready", "blocked", "done"}
+EXTERNAL_STATES = {"available", "unavailable", "unknown"}
 
 
 class DuplicateKey(ValueError):
@@ -538,7 +543,8 @@ def unique_index(records: Any, where: str, errors: list[str]) -> dict[str, dict[
     return result
 
 
-def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: list[str]) -> None:
+def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: list[str],
+                      *, normative: bool = True) -> None:
     strict_object(record, EVIDENCE_KEYS, where, errors)
     text(record.get("id"), f"{where}.id", errors, EVIDENCE_RE)
     if record.get("kind") not in {"merge_ci", "external_probe"}: errors.append(f"EVIDENCE_KIND {where}")
@@ -556,13 +562,14 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
     if ci.get("url") != expected_url: errors.append(f"EVIDENCE_CI_URL {where}")
     if ci.get("head_sha") != record.get("merge_sha"): errors.append(f"EVIDENCE_CI_SHA_MISMATCH {where}")
     checks = string_list(ci.get("required_checks"), f"{where}.ci.required_checks", errors, nonempty=True)
-    if repository_id not in NORMATIVE_CHECKS or set(checks) != NORMATIVE_CHECKS.get(repository_id):
+    if normative and (repository_id not in NORMATIVE_CHECKS
+                      or set(checks) != NORMATIVE_CHECKS.get(repository_id)):
         errors.append(f"EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE {where}")
     contract = record.get("check_contract")
     expected_contract = CHECK_CONTRACT.get(repository_id)
     if expected_contract is None and contract is not None:
         errors.append(f"EVIDENCE_CHECK_CONTRACT_UNEXPECTED {where}")
-    elif expected_contract is not None and contract is None:
+    elif normative and expected_contract is not None and contract is None:
         errors.append(f"EVIDENCE_CHECK_CONTRACT_REQUIRED {where}")
     elif contract is not None:
         contract = strict_object(contract, CHECK_CONTRACT_KEYS, f"{where}.check_contract", errors)
@@ -606,6 +613,248 @@ def validate_controller_claim(record: dict[str, Any], where: str, errors: list[s
     for index, evidence_ref in enumerate(refs):
         if not EVIDENCE_RE.fullmatch(evidence_ref):
             errors.append(f"FORMAT {where}.dependency_evidence_refs[{index}]")
+
+
+def required_evidence_refs(work: dict[str, Any], work_items: dict[str, dict[str, Any]],
+                           externals: dict[str, dict[str, Any]], where: str,
+                           errors: list[str]) -> set[str]:
+    required: set[str] = set()
+    for dependency_id in string_list(work.get("dependencies"), f"{where}.dependencies", errors):
+        dependency = work_items.get(dependency_id)
+        if dependency is None:
+            errors.append(f"CONTROLLER_DEPENDENCY_MISSING {where} {dependency_id}")
+        else:
+            dependency_refs = dependency.get("evidence_refs")
+            if isinstance(dependency_refs, list):
+                required.update(item for item in dependency_refs if isinstance(item, str))
+    for external_id in string_list(
+        work.get("external_prerequisites"), f"{where}.external_prerequisites", errors
+    ):
+        external = externals.get(external_id)
+        if external is None:
+            errors.append(f"CONTROLLER_EXTERNAL_MISSING {where} {external_id}")
+        else:
+            external_refs = external.get("evidence_refs")
+            if isinstance(external_refs, list):
+                required.update(item for item in external_refs if isinstance(item, str))
+    return required
+
+
+def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datetime,
+                                 label: str, errors: list[str], *, claims_at: bool = False) -> dict[str, Any]:
+    """Strictly validate one immutable controller claims/state/evidence snapshot."""
+    claims_doc = strict_object(
+        documents.get("claims.json"), {"document_type", "schema_version", "claims"},
+        f"{label}.claims", errors,
+    )
+    state_doc = strict_object(
+        documents.get("state.json"),
+        {"document_type", "schema_version", "repositories", "capabilities",
+         "external_capabilities", "work_items"},
+        f"{label}.state", errors,
+    )
+    evidence_doc = strict_object(
+        documents.get("evidence.json"), {"document_type", "schema_version", "evidence"},
+        f"{label}.evidence", errors,
+    )
+    if claims_doc.get("document_type") != "claims-registry":
+        errors.append(f"CONTROLLER_CLAIMS_TYPE {label}")
+    if state_doc.get("document_type") != "delivery-state":
+        errors.append(f"CONTROLLER_STATE_TYPE {label}")
+    if evidence_doc.get("document_type") != "evidence-registry":
+        errors.append(f"CONTROLLER_EVIDENCE_TYPE {label}")
+    if any(document.get("schema_version") != 1 for document in (claims_doc, state_doc, evidence_doc)):
+        errors.append(f"CONTROLLER_SCHEMA_VERSION {label}")
+
+    repositories = unique_index(state_doc.get("repositories"), f"{label}.repositories", errors)
+    capabilities = unique_index(state_doc.get("capabilities"), f"{label}.capabilities", errors)
+    externals = unique_index(
+        state_doc.get("external_capabilities"), f"{label}.external_capabilities", errors
+    )
+    work_items = unique_index(state_doc.get("work_items"), f"{label}.work_items", errors)
+    evidence = unique_index(evidence_doc.get("evidence"), f"{label}.evidence", errors)
+    claims = unique_index(claims_doc.get("claims"), f"{label}.claims", errors)
+    if len(repositories) < 3:
+        errors.append(f"CONTROLLER_REPOSITORIES_INCOMPLETE {label}")
+    if not capabilities:
+        errors.append(f"CONTROLLER_CAPABILITIES_EMPTY {label}")
+
+    for repository_id, repository in repositories.items():
+        where = f"{label}.repository.{repository_id}"
+        strict_object(repository, CONTROLLER_REPOSITORY_KEYS, where, errors)
+        text(repository.get("id"), f"{where}.id", errors, ID_RE)
+        if repository.get("role") not in REPOSITORY_ROLES:
+            errors.append(f"CONTROLLER_REPOSITORY_ROLE {where}")
+        if repository.get("url") != REPOSITORY_WEB.get(repository_id):
+            errors.append(f"CONTROLLER_REPOSITORY_URL {where}")
+        text(repository.get("baseline_sha"), f"{where}.baseline_sha", errors, SHA_RE)
+
+    for capability_id, capability in capabilities.items():
+        where = f"{label}.capability.{capability_id}"
+        strict_object(capability, CAPABILITY_KEYS, where, errors)
+        text(capability.get("id"), f"{where}.id", errors, ID_RE)
+        owner = text(capability.get("owner_repository"), f"{where}.owner_repository", errors, ID_RE)
+        if owner not in repositories:
+            errors.append(f"CONTROLLER_CAPABILITY_OWNER_MISSING {where}")
+        if not isinstance(capability.get("write_exclusive"), bool):
+            errors.append(f"TYPE {where}.write_exclusive: expected boolean")
+        text(capability.get("scope"), f"{where}.scope", errors)
+
+    for evidence_id, record in evidence.items():
+        where = f"{label}.evidence.{evidence_id}"
+        validate_evidence(record, at, where, errors, normative=False)
+        if record.get("repository_id") not in repositories:
+            errors.append(f"CONTROLLER_EVIDENCE_REPOSITORY_MISSING {where}")
+
+    for external_id, external in externals.items():
+        where = f"{label}.external.{external_id}"
+        strict_object(external, EXTERNAL_KEYS, where, errors)
+        text(external.get("id"), f"{where}.id", errors, ID_RE)
+        if external.get("state") not in EXTERNAL_STATES:
+            errors.append(f"CONTROLLER_EXTERNAL_STATE {where}")
+        refs = string_list(external.get("evidence_refs"), f"{where}.evidence_refs", errors)
+        for evidence_id in refs:
+            if not EVIDENCE_RE.fullmatch(evidence_id) or evidence_id not in evidence:
+                errors.append(f"CONTROLLER_EVIDENCE_REF_MISSING {where} {evidence_id}")
+        string_list(external.get("blocks"), f"{where}.blocks", errors)
+
+    for work_id, work in work_items.items():
+        where = f"{label}.work.{work_id}"
+        strict_object(work, WORK_KEYS, where, errors)
+        if not re.fullmatch(r"^[A-Z]+(?:-[A-Z]+)+-[0-9]+$", str(work.get("id", ""))):
+            errors.append(f"FORMAT {where}.id")
+        owner = text(work.get("owner_repository"), f"{where}.owner_repository", errors, ID_RE)
+        if owner not in repositories:
+            errors.append(f"CONTROLLER_WORK_OWNER_MISSING {where}")
+        work_capabilities = string_list(
+            work.get("capabilities"), f"{where}.capabilities", errors, nonempty=True
+        )
+        for capability_id in work_capabilities:
+            capability = capabilities.get(capability_id)
+            if capability is None:
+                errors.append(f"CONTROLLER_WORK_CAPABILITY_MISSING {where} {capability_id}")
+            elif capability.get("owner_repository") != owner:
+                errors.append(f"CONTROLLER_WORK_CAPABILITY_OWNER_MISMATCH {where} {capability_id}")
+        if work.get("status") not in WORK_STATUSES:
+            errors.append(f"CONTROLLER_WORK_STATUS {where}")
+        for evidence_id in string_list(work.get("evidence_refs"), f"{where}.evidence_refs", errors):
+            if evidence_id not in evidence:
+                errors.append(f"CONTROLLER_EVIDENCE_REF_MISSING {where} {evidence_id}")
+        # Resolve every reference even for non-ready work; terminal/unrelated claims cannot hide bad IDs.
+        required_evidence_refs(work, work_items, externals, where, errors)
+
+    for claim_id, claim in claims.items():
+        where = f"{label}.claim.{claim_id}"
+        validate_controller_claim(claim, where, errors, at if claims_at else None)
+        repository_id = claim.get("repository_id")
+        work = work_items.get(claim.get("work_item_id"))
+        if repository_id not in repositories:
+            errors.append(f"CONTROLLER_CLAIM_REPOSITORY_MISSING {where}")
+        if work is None:
+            errors.append(f"CONTROLLER_CLAIM_WORK_MISSING {where}")
+            required: set[str] = set()
+        else:
+            if work.get("owner_repository") != repository_id:
+                errors.append(f"CONTROLLER_CLAIM_WORK_OWNER_MISMATCH {where}")
+            raw_claim_capabilities = claim.get("capabilities")
+            claim_capabilities = ([item for item in raw_claim_capabilities if isinstance(item, str)]
+                                  if isinstance(raw_claim_capabilities, list) else [])
+            raw_work_capabilities = work.get("capabilities")
+            work_capability_set = ({item for item in raw_work_capabilities if isinstance(item, str)}
+                                   if isinstance(raw_work_capabilities, list) else set())
+            if (not isinstance(raw_claim_capabilities, list)
+                    or len(claim_capabilities) != len(raw_claim_capabilities)
+                    or not set(claim_capabilities).issubset(work_capability_set)):
+                errors.append(f"CONTROLLER_CLAIM_CAPABILITIES_NOT_SUBSET {where}")
+            for capability_id in claim_capabilities:
+                capability = capabilities.get(capability_id)
+                if capability is None:
+                    errors.append(f"CONTROLLER_CLAIM_CAPABILITY_MISSING {where} {capability_id}")
+                elif capability.get("owner_repository") != repository_id:
+                    errors.append(f"CONTROLLER_CLAIM_CAPABILITY_OWNER_MISMATCH {where} {capability_id}")
+                elif capability.get("write_exclusive") is not True:
+                    errors.append(f"CONTROLLER_CLAIM_CAPABILITY_NOT_EXCLUSIVE {where} {capability_id}")
+            required = required_evidence_refs(work, work_items, externals, where, errors)
+        raw_claim_refs = claim.get("dependency_evidence_refs")
+        claim_refs = ({item for item in raw_claim_refs if isinstance(item, str)}
+                      if isinstance(raw_claim_refs, list) else set())
+        if not required.issubset(claim_refs):
+            errors.append(f"CONTROLLER_CLAIM_REQUIRED_EVIDENCE_MISSING {where}")
+        for evidence_id in claim_refs:
+            if evidence_id not in evidence:
+                errors.append(f"CONTROLLER_CLAIM_EVIDENCE_MISSING {where} {evidence_id}")
+
+    return {
+        "repositories": repositories, "capabilities": capabilities, "externals": externals,
+        "work_items": work_items, "evidence": evidence, "claims": claims,
+    }
+
+
+def load_controller_snapshot(root: Path, revision: str, at: datetime, label: str,
+                             errors: list[str], *, claims_at: bool = False) -> dict[str, Any]:
+    documents = {
+        name: git_json(root, revision, f"product/delivery/{name}", errors)
+        for name in ("claims.json", "state.json", "evidence.json")
+    }
+    if any(not document for document in documents.values()):
+        return {}
+    return validate_controller_snapshot(documents, at, label, errors, claims_at=claims_at)
+
+
+def admission_snapshot_errors(controller_root: Path, controller_head: str, public_root: Path,
+                              state: dict[str, Any], at: datetime, where: str) -> list[str]:
+    """Authenticate one execution state against its own immutable issuance snapshot."""
+    errors: list[str] = []
+    admission = state["admission"]
+    issuance = admission["controller_commit_sha"]
+    if git(controller_root, "cat-file", "-e", f"{issuance}^{{commit}}", check=False).returncode:
+        return [f"CONTROLLER_ISSUANCE_UNAVAILABLE {where}"]
+    if not is_ancestor(controller_root, issuance, controller_head):
+        errors.append(f"CONTROLLER_ISSUANCE_NOT_ANCESTOR {where}")
+    snapshot = load_controller_snapshot(
+        controller_root, issuance, at, f"{where}.issuance", errors
+    )
+    if not snapshot:
+        return errors
+    claim = snapshot["claims"].get(admission["claim_id"])
+    if claim is None:
+        return errors + [f"CONTROLLER_ISSUANCE_CLAIM_MISSING {where}"]
+    expected = {
+        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
+        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
+        "base_sha": admission["base_sha"], "branch": admission["branch"],
+        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
+        "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
+        "dependency_evidence_refs": admission["dependency_evidence_refs"],
+    }
+    if claim != expected:
+        errors.append(f"CONTROLLER_ISSUANCE_CLAIM_BINDING_MISMATCH {where}")
+    if canonical_digest(claim) != admission["claim_digest"]:
+        errors.append(f"CONTROLLER_ISSUANCE_CLAIM_DIGEST_MISMATCH {where}")
+    bindings = {item["id"]: item["digest"] for item in admission["dependency_evidence"]}
+    for evidence_id in admission["dependency_evidence_refs"]:
+        record = snapshot["evidence"].get(evidence_id)
+        if record is None:
+            errors.append(f"CONTROLLER_ISSUANCE_EVIDENCE_MISSING {where} {evidence_id}")
+            continue
+        validate_evidence(record, at, f"{where}.issuance.evidence.{evidence_id}", errors)
+        if canonical_digest(record) != bindings.get(evidence_id):
+            errors.append(f"CONTROLLER_ISSUANCE_EVIDENCE_DIGEST_MISMATCH {where} {evidence_id}")
+        contract = record.get("check_contract")
+        if isinstance(contract, dict):
+            if record.get("repository_id") != "ccm-public":
+                errors.append(f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {where} {evidence_id}")
+                continue
+            public_head = git(public_root, "rev-parse", "HEAD", check=False).stdout.strip()
+            if not is_ancestor(public_root, record.get("merge_sha", ""), public_head):
+                errors.append(f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {where} {evidence_id}")
+            content = git_bytes(
+                public_root, "show", f"{record.get('merge_sha')}:{contract.get('path')}"
+            )
+            measured = bytes_digest(content.stdout) if content.returncode == 0 else None
+            if measured != contract.get("content_digest"):
+                errors.append(f"EVIDENCE_CHECK_CONTRACT_DIGEST_MISMATCH {where} {evidence_id}")
+    return errors
 
 
 def analyze_claim_history(claims: dict[str, dict[str, Any]], claim: dict[str, Any],
@@ -699,8 +948,9 @@ def state_at_checkpoint(root: Path, checkpoint: str, claim_id: str,
     return state
 
 
-def lineage_state_errors(public_root: Path, state: dict[str, Any],
-                         lineage: list[dict[str, Any]]) -> list[str]:
+def lineage_state_errors(public_root: Path, controller_root: Path, controller_head: str,
+                         state: dict[str, Any], lineage: list[dict[str, Any]],
+                         at: datetime) -> list[str]:
     """Bind every generation to its exact state path and recursively named checkpoint."""
     errors: list[str] = []
     if not lineage:
@@ -712,6 +962,10 @@ def lineage_state_errors(public_root: Path, state: dict[str, Any],
     if current_claim is None:
         return ["CONTROLLER_CURRENT_CLAIM_GENERATION_MISSING"]
     errors.extend(state_claim_identity_errors(state, current_claim, f"generation-{current_generation}"))
+    errors.extend(admission_snapshot_errors(
+        controller_root, controller_head, public_root, state, at,
+        f"generation-{current_generation}",
+    ))
     child_state = state
     for generation in range(current_generation - 1, 0, -1):
         link = child_state["admission"].get("predecessor")
@@ -726,6 +980,9 @@ def lineage_state_errors(public_root: Path, state: dict[str, Any],
         if previous is None:
             break
         errors.extend(state_claim_identity_errors(previous, claim, f"generation-{generation}"))
+        errors.extend(admission_snapshot_errors(
+            controller_root, controller_head, public_root, previous, at, f"generation-{generation}"
+        ))
         errors.extend(append_only_errors(previous, child_state))
         child_state = previous
     if current_generation == 1:
@@ -751,36 +1008,20 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
     if git(root, "cat-file", "-e", f"{issuance}^{{commit}}", check=False).returncode:
         return errors + ["CONTROLLER_ISSUANCE_UNAVAILABLE"], True, []
     if not is_ancestor(root, issuance, head): errors.append("CONTROLLER_ISSUANCE_NOT_ANCESTOR")
-    docs: dict[str, dict[str, Any]] = {}
-    for name in ("claims.json", "state.json", "evidence.json"):
-        docs[name] = git_json(root, head, f"product/delivery/{name}", errors)
-    issuance_claims = git_json(root, issuance, "product/delivery/claims.json", errors)
-    if any(not doc for doc in (*docs.values(), issuance_claims)):
+    snapshot = load_controller_snapshot(root, head, at, "controller", errors, claims_at=True)
+    if not snapshot:
         return errors, True, []
-    if strict_object(docs["claims.json"], {"document_type", "schema_version", "claims"}, "controller.claims", errors).get("document_type") != "claims-registry": errors.append("CONTROLLER_CLAIMS_TYPE")
-    if strict_object(docs["state.json"], {"document_type", "schema_version", "repositories", "capabilities", "external_capabilities", "work_items"}, "controller.state", errors).get("document_type") != "delivery-state": errors.append("CONTROLLER_STATE_TYPE")
-    if strict_object(docs["evidence.json"], {"document_type", "schema_version", "evidence"}, "controller.evidence", errors).get("document_type") != "evidence-registry": errors.append("CONTROLLER_EVIDENCE_TYPE")
-    if any(doc.get("schema_version") != 1 for doc in docs.values()): errors.append("CONTROLLER_SCHEMA_VERSION")
-    issuance_top = strict_object(issuance_claims, {"document_type", "schema_version", "claims"}, "controller.issuance_claims", errors)
-    if issuance_top.get("document_type") != "claims-registry" or issuance_top.get("schema_version") != 1:
-        errors.append("CONTROLLER_ISSUANCE_CLAIMS_TYPE")
-    claims = unique_index(docs["claims.json"].get("claims"), "controller.claims", errors)
-    old_claims = unique_index(issuance_claims.get("claims"), "controller.issuance_claims", errors)
-    work_items = unique_index(docs["state.json"].get("work_items"), "controller.work_items", errors)
-    externals = unique_index(docs["state.json"].get("external_capabilities"), "controller.external_capabilities", errors)
-    evidence = unique_index(docs["evidence.json"].get("evidence"), "controller.evidence", errors)
-    for registered_id, registered_claim in claims.items():
-        validate_controller_claim(registered_claim, f"controller.claim.{registered_id}", errors, at)
-    for registered_id, registered_claim in old_claims.items():
-        validate_controller_claim(registered_claim, f"controller.issuance_claim.{registered_id}", errors)
+    claims = snapshot["claims"]
+    work_items = snapshot["work_items"]
+    externals = snapshot["externals"]
+    evidence = snapshot["evidence"]
     claim_id = admission["claim_id"]
-    claim, issued_claim = claims.get(claim_id), old_claims.get(claim_id)
-    if claim is None or issued_claim is None:
+    claim = claims.get(claim_id)
+    if claim is None:
         errors.append("CONTROLLER_CLAIM_MISSING")
         return errors, False, []
     history_errors, lineage = analyze_claim_history(claims, claim, admission["predecessor"])
     errors.extend(history_errors)
-    if claim != issued_claim: errors.append("CONTROLLER_CLAIM_REVOKED_OR_CHANGED")
     if canonical_digest(claim) != admission["claim_digest"]: errors.append("CLAIM_DIGEST_MISMATCH")
     expected = {
         "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
@@ -790,7 +1031,8 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
         "dependency_evidence_refs": admission["dependency_evidence_refs"],
     }
-    if claim != expected: errors.append("CLAIM_BINDING_MISMATCH")
+    if claim != expected:
+        errors.extend(["CONTROLLER_CLAIM_REVOKED_OR_CHANGED", "CLAIM_BINDING_MISMATCH"])
     claim_issued = timestamp(claim.get("issued_at"), "controller.claim.issued_at", errors)
     claim_expires = timestamp(claim.get("expires_at"), "controller.claim.expires_at", errors)
     if claim_issued is not None and claim_expires is not None and not claim_issued <= at < claim_expires:
@@ -831,7 +1073,7 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         validate_evidence(record, at, f"controller.evidence.{evidence_id}", errors)
         if canonical_digest(record) != bindings.get(evidence_id): errors.append(f"EVIDENCE_DIGEST_MISMATCH {evidence_id}")
         contract = record.get("check_contract")
-        if contract is not None:
+        if isinstance(contract, dict):
             if record.get("repository_id") != "ccm-public":
                 errors.append(f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {evidence_id}")
             else:
@@ -866,7 +1108,7 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
                 active_identity = {**identity, "status": "active"}
                 if canonical_digest(active_identity) != prior_admission["claim_digest"]:
                     errors.append("PREDECESSOR_ACTIVE_CLAIM_DIGEST_MISMATCH")
-    errors.extend(lineage_state_errors(public_root, state, lineage))
+    errors.extend(lineage_state_errors(public_root, root, head, state, lineage, at))
     return errors, unavailable, [claim["id"] for claim in lineage]
 
 

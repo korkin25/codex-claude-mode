@@ -79,7 +79,18 @@ class ExecutionStateTests(unittest.TestCase):
         return {
             "claims.json": {"document_type": "claims-registry", "schema_version": 1, "claims": claims},
             "state.json": {"document_type": "delivery-state", "schema_version": 1,
-                "repositories": [], "capabilities": [],
+                "repositories": [
+                    {"id": "ccm-public", "role": "public_client",
+                     "url": "https://github.com/korkin25/codex-claude-mode", "baseline_sha": self.base},
+                    {"id": "ccm-multi", "role": "product_integration",
+                     "url": "https://github.com/korkin25/ccm-multi", "baseline_sha": "c" * 40},
+                    {"id": "aor", "role": "authoritative_runtime",
+                     "url": "https://github.com/korkin25/agent-orchestrator", "baseline_sha": "a" * 40}],
+                "capabilities": [
+                    {"id": "ccm.public-client", "owner_repository": "ccm-public",
+                     "write_exclusive": True, "scope": "public client"},
+                    {"id": "multi.contracts", "owner_repository": "ccm-multi",
+                     "write_exclusive": True, "scope": "shared contracts"}],
                 "external_capabilities": [], "work_items": [
                     {"id": "CCM-REMOTE-CTL-001", "owner_repository": "ccm-multi",
                      "capabilities": ["multi.contracts"], "status": "done", "dependencies": [],
@@ -136,8 +147,10 @@ class ExecutionStateTests(unittest.TestCase):
         run_git(self.root, "add", str(path)); run_git(self.root, "commit", "-m", "checkpoint")
         return run_git(self.root, "rev-parse", "HEAD")
 
-    def generation_three(self, *, second_predecessor_id="claim-serve-1"):
+    def generation_three(self, *, second_predecessor_id="claim-serve-1", first_state_mutate=None):
         first_state = self.state()
+        if first_state_mutate:
+            first_state_mutate(first_state)
         first_head = self.commit_state(first_state)
         first_claim = copy.deepcopy(self.claim); first_claim["status"] = "released"
 
@@ -329,6 +342,53 @@ class ExecutionStateTests(unittest.TestCase):
         self.controller_head = self.commit_controller([self.claim])
         result = self.inspect(state, head)
         self.assertIn("EVIDENCE_DIGEST_MISMATCH evidence-dependency", result["errors"])
+
+    def test_evidence_added_after_issuance_cannot_retroactively_authorize_claim(self):
+        self.controller_head = self.commit_controller(
+            [self.claim],
+            lambda documents: documents["evidence.json"].update({"evidence": []}),
+        )
+        state = self.state()
+        head = self.commit_state(state)
+        self.controller_head = self.commit_controller([self.claim])
+
+        result = self.inspect(state, head)
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_EVIDENCE_MISSING generation-1 evidence-dependency",
+            result["errors"],
+        )
+
+    def test_unrelated_terminal_claim_with_nonexistent_references_is_rejected(self):
+        unrelated = copy.deepcopy(self.claim)
+        unrelated.update({
+            "id": "claim-unrelated", "work_item_id": "CCM-GHOST-001",
+            "repository_id": "ghost", "capabilities": ["ghost.capability"],
+            "status": "released", "dependency_evidence_refs": ["evidence-ghost"],
+        })
+        state = self.state()
+        head = self.commit_state(state)
+        self.controller_head = self.commit_controller([self.claim, unrelated])
+
+        result = self.inspect(state, head)
+        self.assertIn(
+            "CONTROLLER_CLAIM_WORK_MISSING controller.claim.claim-unrelated",
+            result["errors"],
+        )
+        self.assertIn(
+            "CONTROLLER_CLAIM_EVIDENCE_MISSING controller.claim.claim-unrelated evidence-ghost",
+            result["errors"],
+        )
+
+    def test_historical_state_evidence_digest_is_checked_at_its_issuance(self):
+        def corrupt_binding(state):
+            state["admission"]["dependency_evidence"][0]["digest"] = "sha256:" + "f" * 64
+
+        state, path, head, *_ = self.generation_three(first_state_mutate=corrupt_binding)
+        result = self.inspect(state, head, path=path)
+        self.assertIn(
+            "CONTROLLER_ISSUANCE_EVIDENCE_DIGEST_MISMATCH generation-1 evidence-dependency",
+            result["errors"],
+        )
 
     def test_controller_duplicate_json_is_local_only(self):
         state = self.state(); head = self.commit_state(state)
