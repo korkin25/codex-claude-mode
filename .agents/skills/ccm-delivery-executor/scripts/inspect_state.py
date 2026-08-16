@@ -275,6 +275,98 @@ class GitResult(NamedTuple):
     stderr: bytes
 
 
+class LocalConfigEntry(NamedTuple):
+    key: str
+    value: str
+
+
+def _strip_config_comment(value: str) -> str:
+    """Strip a Git-config comment without interpreting or executing config."""
+    quoted = False
+    escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+        elif character == "\\" and quoted:
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character in "#;" and not quoted:
+            return value[:index].rstrip()
+    if quoted or escaped:
+        raise ValueError("unterminated quoted value")
+    return value.rstrip()
+
+
+def _config_value(raw: str) -> str:
+    value = _strip_config_comment(raw).strip()
+    if not value.startswith('"'):
+        if '"' in value or "\\" in value:
+            raise ValueError("unsupported unquoted escape")
+        return value
+    if len(value) < 2 or not value.endswith('"'):
+        raise ValueError("unterminated quoted value")
+    decoded: list[str] = []
+    escaped = False
+    escapes = {'"': '"', "\\": "\\", "n": "\n", "t": "\t", "b": "\b"}
+    for character in value[1:-1]:
+        if escaped:
+            if character not in escapes:
+                raise ValueError("unsupported quoted escape")
+            decoded.append(escapes[character]); escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            raise ValueError("unescaped quote")
+        else:
+            decoded.append(character)
+    if escaped:
+        raise ValueError("unterminated escape")
+    return "".join(decoded)
+
+
+def parse_local_config(raw: bytes) -> list[LocalConfigEntry]:
+    """Parse the inert subset used by repository-local config, failing closed."""
+    if len(raw) > GIT_OUTPUT_LIMIT or b"\x00" in raw:
+        raise ValueError("config size or NUL")
+    text_value = raw.decode("utf-8")
+    if any(line.rstrip("\r").endswith("\\") for line in text_value.splitlines()):
+        raise ValueError("continued config line")
+    section: str | None = None
+    entries: list[LocalConfigEntry] = []
+    section_re = re.compile(r'^\s*\[([A-Za-z0-9][A-Za-z0-9.-]*)(?:\s+"([^"\\\x00-\x1f]*)")?\]\s*(?:[#;].*)?$')
+    variable_re = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?$")
+    for source_line in text_value.splitlines():
+        line = source_line.rstrip("\r")
+        if not line.strip() or line.lstrip().startswith(("#", ";")):
+            continue
+        match = section_re.fullmatch(line)
+        if match:
+            section = match.group(1).lower()
+            if match.group(2) is not None:
+                section += "." + match.group(2)
+            continue
+        if section is None:
+            raise ValueError("variable before section")
+        match = variable_re.fullmatch(line)
+        if not match:
+            raise ValueError("unsupported config syntax")
+        value = "true" if match.group(2) is None else _config_value(match.group(2))
+        entries.append(LocalConfigEntry(f"{section}.{match.group(1).lower()}", value))
+    return entries
+
+
+def local_config(root: Path) -> list[LocalConfigEntry]:
+    path = root / ".git/config"
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+            raise ValueError("unsafe config path")
+        return parse_local_config(path.read_bytes())
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise GitProbeError("LOCAL_CONFIG_UNREADABLE") from exc
+
+
 def trusted_git() -> Path:
     effective_uid = os.geteuid()
     for candidate in GIT_CANDIDATES:
@@ -403,30 +495,30 @@ def repository_guard(root: Path, expected_name: str | None = None) -> list[str]:
     except OSError:
         return errors + ["REPOSITORY_LAYOUT_UNAVAILABLE"]
     if errors: return errors
-    config_path = resolved / ".git/config"
-    config = git(resolved, "config", "--file", str(config_path), "--no-includes", "--name-only",
-                 "--get-regexp", ".*", check=False)
-    if config.returncode not in (0, 1): return ["LOCAL_CONFIG_UNREADABLE"]
+    try:
+        config = local_config(resolved)
+    except GitProbeError:
+        return ["LOCAL_CONFIG_UNREADABLE"]
     forbidden_key = re.compile(
         r"^(include\.|includeif\.|url\.|core\.(sshcommand|fsmonitor|hookspath|worktree|alternaterefscommand|sparsecheckout|splitindex)|"
         r"diff\.|filter\.|remote\..*\.(uploadpack|receivepack|promisor|partialclonefilter)|extensions\.(partialclone|worktreeconfig)|index\.sparse)", re.I)
-    if any(forbidden_key.match(key) for key in config.stdout.splitlines()): errors.append("LOCAL_GIT_ACTIVE_CONFIG_FORBIDDEN")
+    if any(forbidden_key.match(entry.key) for entry in config): errors.append("LOCAL_GIT_ACTIVE_CONFIG_FORBIDDEN")
     return errors
 
 
 def remote_errors(root: Path, expected: str) -> list[str]:
     errors: list[str] = []
-    commands = {
-        "RAW_FETCH_URL": ("config", "--file", str(root / ".git/config"), "--no-includes", "--get-all", "remote.origin.url"),
-        "RAW_PUSH_URL": ("config", "--file", str(root / ".git/config"), "--no-includes", "--get-all", "remote.origin.pushurl"),
-        "EFFECTIVE_FETCH_URL": ("remote", "get-url", "--all", "origin"),
-        "EFFECTIVE_PUSH_URL": ("remote", "get-url", "--push", "--all", "origin"),
+    try:
+        entries = local_config(root.resolve(strict=True))
+    except (OSError, GitProbeError):
+        return ["LOCAL_CONFIG_UNREADABLE"]
+    values = {
+        "RAW_FETCH_URL": [entry.value for entry in entries if entry.key == "remote.origin.url"],
+        "RAW_PUSH_URL": [entry.value for entry in entries if entry.key == "remote.origin.pushurl"],
     }
-    values: dict[str, list[str]] = {}
-    for label, command in commands.items():
-        result = git(root, *command, check=False)
-        values[label] = result.stdout.splitlines() if result.returncode == 0 else []
     if not values["RAW_PUSH_URL"]: values["RAW_PUSH_URL"] = values["RAW_FETCH_URL"][:]
+    values["EFFECTIVE_FETCH_URL"] = values["RAW_FETCH_URL"][:]
+    values["EFFECTIVE_PUSH_URL"] = values["RAW_PUSH_URL"][:]
     for label, urls in values.items():
         if urls != [expected]: errors.append(f"{label}_MISMATCH expected={expected} actual={urls}")
     return errors

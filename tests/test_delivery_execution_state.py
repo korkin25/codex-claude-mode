@@ -10,6 +10,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests/fixtures/git-config"
 SCRIPT = ROOT / ".agents/skills/ccm-delivery-executor/scripts/inspect_state.py"
 SPEC = importlib.util.spec_from_file_location("inspect_state", SCRIPT)
 inspector = importlib.util.module_from_spec(SPEC)
@@ -25,7 +26,9 @@ def run_git(root: Path, *args: str) -> str:
 class ExecutionStateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        temporary_root = Path(self.temporary.name)
+        # macOS exposes its temporary root through /var -> /private/var. Build
+        # fixture repositories from the canonical path just like production.
+        temporary_root = Path(self.temporary.name).resolve()
         self.root = temporary_root / "public"
         self.controller = temporary_root / "ccm-multi"
         self.root.mkdir(); self.controller.mkdir()
@@ -291,6 +294,40 @@ class ExecutionStateTests(unittest.TestCase):
         self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
         self.assertTrue(Path(inspector.git_command(("version",))[0]).is_absolute())
         self.assertNotIn("GIT_INDEX_FILE", inspector.git_environment())
+
+    def test_linux_and_macos_local_config_fixtures_are_parsed_without_git(self):
+        expected = [inspector.LocalConfigEntry("core.repositoryformatversion", "0"),
+                    inspector.LocalConfigEntry("core.filemode", "true"),
+                    inspector.LocalConfigEntry("remote.origin.url", inspector.REMOTE),
+                    inspector.LocalConfigEntry("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")]
+        for platform in ("linux", "macos"):
+            with self.subTest(platform=platform):
+                raw = (FIXTURES / f"{platform}.config").read_bytes()
+                if platform == "macos":
+                    raw = raw.replace(b"\n", b"\r\n")
+                with mock.patch.object(inspector, "bounded_git", side_effect=AssertionError("config parser invoked Git")):
+                    self.assertEqual(expected, inspector.parse_local_config(raw))
+
+    def test_local_config_parser_rejects_executable_and_ambiguous_syntax(self):
+        active = b'[core]\n\tfsmonitor = /tmp/attacker\n'
+        parsed = inspector.parse_local_config(active)
+        self.assertEqual("core.fsmonitor", parsed[0].key)
+        for raw in (b'[include]\npath = /tmp/attacker\n',
+                    b'[remote "origin"]\nurl = value\\\ncontinued\n',
+                    b'[remote "origin"]\nurl = "unterminated\n',
+                    b'[core]\nkey = value\\escape\n'):
+            with self.subTest(raw=raw):
+                if raw.startswith(b"[include]"):
+                    entries = inspector.parse_local_config(raw)
+                    self.assertEqual("include.path", entries[0].key)
+                else:
+                    with self.assertRaises(ValueError):
+                        inspector.parse_local_config(raw)
+
+    def test_repository_guard_still_rejects_a_symlink_root(self):
+        alias = self.root.parent / "public-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.assertIn("REPOSITORY_ROOT_NOT_CANONICAL", inspector.repository_guard(alias))
 
     def test_active_git_config_is_rejected_before_attacker_program_runs(self):
         state = self.state(); head = self.commit_state(state)
