@@ -16,8 +16,11 @@ input, not standing authority or permission to merge.
 3. Require one complete claim obtained from an exact `ccm-multi` commit: claim
    ID and generation, principal, `repository_id=ccm-public`, exact base SHA,
    task branch, exclusive capability set, issue/expiry times, and dependency
-   evidence references. Require the claimed task and capability to agree with
-   the public manifest and task registry.
+   evidence references and canonical digests of every referenced evidence
+   object. Require the claimed task and capability to agree with the public
+   manifest and task registry. On recovery, measure the current `ccm-multi`
+   SSH `main` head and validate the claim there again; its issuance snapshot
+   cannot hide later revocation or supersession.
 4. Fetch only through the canonical SSH remote. Require a clean isolated
    worktree/clone whose `main` and remote `main` equal the claim base. Never use
    Git HTTPS or a credential store.
@@ -42,11 +45,15 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
 ```
 
 The first task-branch commit must contain the `claimed` state and bind the
-exact controller commit, claim digest, public base, branch, capability, and
-claim generation. Every later task-branch commit must update that same state:
+exact controller commit, claim/evidence digests, public base, branch,
+capabilities, and claim generation. Generation 1 starts directly at the claim
+base (`HEAD^ == base_sha`). A later generation explicitly names the immediately
+preceding closed claim and its exact pushed checkpoint SHA. Every later
+task-branch commit must update that same state:
 increment `checkpoint.sequence`, set `checkpoint.parent_sha` to the commit's
 first parent, update phase/kind/time, record facts already checked, and state a
-concrete `next_action`. Never put secrets, prompts, credentials, raw approval
+concrete `next_action`. Timestamps and completed checks/acceptance are
+monotonic and append-only. Never put secrets, prompts, credentials, raw approval
 payloads, or private Telegram routing in it.
 
 Keep the state and implementation in the same commit. After commit, require the
@@ -60,14 +67,21 @@ On every fresh process or after an abrupt/planned restart, do no implementation
 writes until this command returns `classification: clean` and `admitted: true`:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 \
+env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  PYTHONDONTWRITEBYTECODE=1 python3 \
   .agents/skills/ccm-delivery-executor/scripts/inspect_state.py inspect \
   --root . --state delivery/executions/<claim-id>.json \
-  --at <timezone-aware-RFC3339> --remote-head <40-hex-SSH-branch-head>
+  --at <timezone-aware-RFC3339> --remote-head <40-hex-SSH-branch-head> \
+  --controller-root <isolated-ccm-multi-checkout> \
+  --controller-head <40-hex-SSH-main-head>
 ```
 
-The inspector does not access the network. Measure `--remote-head` separately
-over SSH. Handle its result fail closed:
+The inspector does not access the network. Fetch and measure both heads over
+their canonical SSH remotes with a sanitized Git environment. It verifies
+effective fetch and push URLs and rejects multiple URLs, rewrites, HTTPS,
+state index flags, and state bytes/mode that differ from the exact HEAD blob.
+Handle its result fail closed:
 
 - `clean`: resume only `next_action` after rechecking the claim in the exact
   controller revision;
@@ -79,6 +93,8 @@ over SSH. Handle its result fail closed:
   controller—never force-push or silently rebase;
 - `expired_claim`: stop writes and request a newly reviewed claim generation;
 - `invalid`: stop and repair governance/state under review.
+- `local_only`: local checks passed but the current authoritative controller
+  snapshot was unavailable; report diagnostics and do not write.
 
 A renewed claim must have a greater generation and freshly verified base and
 dependency evidence. Do not edit an expired claim into validity.

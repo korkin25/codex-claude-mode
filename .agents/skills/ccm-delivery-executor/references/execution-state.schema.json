@@ -21,20 +21,48 @@
     "admission": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "owner_principal", "work_item_id", "capability_id", "base_sha", "branch", "issued_at", "expires_at", "dependency_evidence_refs"],
+      "required": ["controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor", "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha", "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence"],
       "properties": {
         "controller_commit_sha": { "$ref": "#/$defs/sha" },
         "claim_digest": { "$ref": "#/$defs/digest" },
         "claim_id": { "$ref": "#/$defs/id" },
         "claim_generation": { "type": "integer", "minimum": 1 },
+        "predecessor": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["claim_id", "generation", "checkpoint_sha"],
+              "properties": {
+                "claim_id": { "$ref": "#/$defs/id" },
+                "generation": { "type": "integer", "minimum": 1 },
+                "checkpoint_sha": { "$ref": "#/$defs/sha" }
+              }
+            }
+          ]
+        },
         "owner_principal": { "$ref": "#/$defs/id" },
         "work_item_id": { "type": "string", "pattern": "^CCM-[A-Z]+-[0-9]{3}$" },
-        "capability_id": { "type": "string", "pattern": "^ccm\\.[a-z0-9]+(?:[.-][a-z0-9]+)*\\.v[1-9][0-9]*$" },
+        "public_capability_id": { "type": "string", "pattern": "^ccm\\.[a-z0-9]+(?:[.-][a-z0-9]+)*\\.v[1-9][0-9]*$" },
+        "capabilities": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
         "base_sha": { "$ref": "#/$defs/sha" },
         "branch": { "type": "string", "minLength": 1 },
         "issued_at": { "$ref": "#/$defs/timestamp" },
         "expires_at": { "$ref": "#/$defs/timestamp" },
-        "dependency_evidence_refs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+        "dependency_evidence_refs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/evidenceRef" } },
+        "dependency_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "digest"],
+            "properties": {
+              "id": { "$ref": "#/$defs/evidenceRef" },
+              "digest": { "$ref": "#/$defs/digest" }
+            }
+          }
+        }
       }
     },
     "execution": {
@@ -75,7 +103,8 @@
   "$defs": {
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "evidenceRef": { "type": "string", "pattern": "^evidence-[a-z0-9][a-z0-9._-]*$" },
     "timestamp": { "type": "string", "format": "date-time" }
   }
 }
