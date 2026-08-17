@@ -46,6 +46,17 @@ through a private read-only descriptor in Python isolated mode. The inspector's
 own base-blob and self-digest comparison is an additional defense, not the
 bootstrap trust anchor.
 
+The launcher obtains the authoritative private checkout from the fixed
+owner-only configuration
+`~/.config/codex-claude-mode/delivery-executor.json`, resolved from the OS
+account rather than `HOME` or `XDG_CONFIG_HOME`. The file is a canonical,
+non-symlink regular file owned by the effective user with mode `0600` and exact
+schema `{"schema_version":1,"canonical_root":"/absolute/path"}`. A supplied
+`--task-root` is only checked for exact lexical and resolved equality with that
+configured root. The downstream argument list cannot nominate `--root` in
+exact, attached, repeated, or abbreviated form; preflight injects its one
+authenticated canonical root after rejecting all such forms.
+
 ## State invariants
 
 The tracked state filename is derived from the validated claim ID. It is an

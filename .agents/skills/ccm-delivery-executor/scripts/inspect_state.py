@@ -1502,11 +1502,11 @@ def parse_now(value: str) -> datetime:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    validate_parser = commands.add_parser("validate")
+    validate_parser = commands.add_parser("validate", allow_abbrev=False)
     validate_parser.add_argument("--state", required=True, type=Path)
-    inspect_parser = commands.add_parser("inspect")
+    inspect_parser = commands.add_parser("inspect", allow_abbrev=False)
     inspect_parser.add_argument("--root", required=True, type=Path)
     inspect_parser.add_argument("--state", required=True, type=Path)
     inspect_parser.add_argument("--at", required=True)

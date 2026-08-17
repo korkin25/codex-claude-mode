@@ -1,10 +1,10 @@
 import copy
 from datetime import datetime
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -18,6 +18,10 @@ SPEC = importlib.util.spec_from_file_location("inspect_state", SCRIPT)
 inspector = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(inspector)
+PREFLIGHT_SPEC = importlib.util.spec_from_file_location("preflight_inspector", PREFLIGHT)
+preflight = importlib.util.module_from_spec(PREFLIGHT_SPEC)
+assert PREFLIGHT_SPEC.loader is not None
+PREFLIGHT_SPEC.loader.exec_module(preflight)
 
 
 def run_git(root: Path, *args: str) -> str:
@@ -230,17 +234,49 @@ class ExecutionStateTests(unittest.TestCase):
         run_git(self.root, "commit", "-m", "substitute task-tree inspector")
         substituted_head = run_git(self.root, "rev-parse", "HEAD")
         digest = inspector.bytes_digest(SCRIPT.read_bytes())
-        command = [sys.executable, str(PREFLIGHT), "--task-root", str(self.root),
-            "--base-sha", self.base, "--inspector-digest", digest, "--", "inspect",
-            "--root", str(self.root), "--state", str(self.state_path),
+        arguments = ["inspect", "--state", str(self.state_path),
             "--at", "2026-08-17T00:00:00Z", "--remote-head", substituted_head,
             "--public-main-head", self.base, "--inspector-digest", digest,
             "--controller-root", str(self.controller), "--controller-head", self.controller_head]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
-        self.assertNotEqual(0, completed.returncode)
-        self.assertFalse(sentinel.exists(), completed.stdout + completed.stderr)
-        self.assertIn('"admitted": false', completed.stdout)
-        self.assertIn("STATE_NOT_UPDATED_IN_HEAD", completed.stdout)
+        status = preflight.run_authenticated_inspector(self.root, self.base, digest, arguments)
+        self.assertNotEqual(0, status)
+        self.assertFalse(sentinel.exists())
+
+    def test_preflight_rejects_all_downstream_root_spellings(self):
+        digest = inspector.bytes_digest(SCRIPT.read_bytes())
+        variants = (["--root", str(self.root)], [f"--root={self.root}"],
+                    ["--roo", str(self.root)], [f"--roo={self.root}"],
+                    ["--root", str(self.root), "--root", str(self.root)])
+        for injected in variants:
+            with self.subTest(arguments=injected):
+                with self.assertRaisesRegex(preflight.PreflightError,
+                                            "PREFLIGHT_RESERVED_ROOT_ARGUMENT"):
+                    preflight.run_authenticated_inspector(
+                        self.root, self.base, digest, ["inspect", *injected]
+                    )
+
+    def test_preflight_rejects_alternate_clone_with_same_origin(self):
+        alternate = self.root.parent / "alternate-public"
+        subprocess.run(["git", "clone", "--no-local", str(self.root), str(alternate)],
+                       check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        run_git(alternate, "remote", "set-url", "origin", inspector.REMOTE)
+        arguments = ["--task-root", str(alternate), "--base-sha", self.base,
+                     "--inspector-digest", inspector.bytes_digest(SCRIPT.read_bytes()),
+                     "--", "inspect", "--state", str(self.state_path)]
+        with mock.patch.object(preflight, "configured_task_root", return_value=self.root), \
+                mock.patch("sys.stdout"):
+            status = preflight.main(arguments)
+        self.assertEqual(1, status)
+
+    def test_inspector_parser_rejects_abbreviated_root(self):
+        arguments = ["inspect", "--roo", str(self.root), "--state", str(self.state_path),
+                     "--at", "2026-08-17T00:00:00Z", "--remote-head", self.base,
+                     "--public-main-head", self.base, "--inspector-digest",
+                     inspector.bytes_digest(SCRIPT.read_bytes())]
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr), self.assertRaises(SystemExit):
+            inspector.main(arguments)
+        self.assertIn("the following arguments are required: --root", stderr.getvalue())
 
     def test_cli_preserves_lexical_symlink_root(self):
         state = self.state(); head = self.commit_state(state)

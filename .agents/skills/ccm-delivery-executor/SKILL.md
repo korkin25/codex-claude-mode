@@ -78,7 +78,7 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
   PYTHONDONTWRITEBYTECODE=1 python3 <trusted-preflight-inspector.py> \
   --task-root <canonical-private-clone> --base-sha <40-hex-SSH-main-head> \
   --inspector-digest <externally-measured-sha256-digest> -- inspect \
-  --root <canonical-private-clone> --state delivery/executions/<claim-id>.json \
+  --state delivery/executions/<claim-id>.json \
   --at <timezone-aware-RFC3339> --remote-head <40-hex-SSH-branch-head> \
   --public-main-head <40-hex-SSH-main-head> \
   --inspector-digest <externally-measured-sha256-digest> \
@@ -86,6 +86,14 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
   --controller-root <isolated-ccm-multi-checkout> \
   --controller-head <40-hex-SSH-main-head>
 ```
+
+The active private ROOT/user configuration must select the fixed canonical
+private clone in `~/.config/codex-claude-mode/delivery-executor.json` (mode
+`0600`, exact schema `{"schema_version":1,"canonical_root":"/absolute/path"}`).
+`--task-root` is only an equality assertion against that owner configuration;
+an alternate clone with the same origin is not authoritative. Do not pass
+`--root` after `--`: the launcher rejects exact, attached, repeated, and
+abbreviated forms and injects exactly one authenticated root itself.
 
 The launcher and inspector do not access the network. The trusted launcher uses
 bounded trusted Git to extract the inspector blob from the exact admitted base,

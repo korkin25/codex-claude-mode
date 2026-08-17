@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import selectors
 import signal
@@ -24,6 +25,8 @@ INSPECTOR_PATH = ".agents/skills/ccm-delivery-executor/scripts/inspect_state.py"
 GIT_CANDIDATES = (Path("/usr/bin/git"), Path("/bin/git"))
 TIMEOUT_SECONDS = 5.0
 MAX_INSPECTOR_BYTES = 4 * 1024 * 1024
+MAX_ROOT_CONFIG_BYTES = 4096
+ROOT_CONFIG_SUFFIX = (".config", "codex-claude-mode", "delivery-executor.json")
 
 
 class PreflightError(RuntimeError):
@@ -131,17 +134,80 @@ def option_value(arguments: list[str], option: str) -> str | None:
     return arguments[positions[0] + 1]
 
 
+def reserved_option(argument: str, option: str) -> bool:
+    """Reject exact, attached, and argparse-prefix spellings of an injected option."""
+    name = argument.split("=", 1)[0]
+    return name.startswith("--") and (name == option or option.startswith(name))
+
+
+def owner_root_config() -> Path:
+    """Return the fixed per-owner configuration path without trusting HOME/XDG variables."""
+    try:
+        owner_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except KeyError as exc:
+        raise PreflightError("PREFLIGHT_OWNER_HOME_UNAVAILABLE") from exc
+    return owner_home.joinpath(*ROOT_CONFIG_SUFFIX)
+
+
+def configured_task_root() -> Path:
+    """Load the private owner-selected root from a fixed, non-symlink configuration file."""
+    config = owner_root_config()
+    try:
+        parent = config.parent
+        if parent.resolve(strict=True) != parent or config.resolve(strict=True) != config:
+            raise PreflightError("PREFLIGHT_ROOT_CONFIG_NONCANONICAL")
+        metadata = config.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise PreflightError("PREFLIGHT_ROOT_CONFIG_UNTRUSTED")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise PreflightError("PREFLIGHT_ROOT_CONFIG_PERMISSIONS")
+        descriptor = os.open(config, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise PreflightError("PREFLIGHT_ROOT_CONFIG_CHANGED")
+            raw = os.read(descriptor, MAX_ROOT_CONFIG_BYTES + 1)
+        finally:
+            os.close(descriptor)
+    except PreflightError:
+        raise
+    except OSError as exc:
+        raise PreflightError("PREFLIGHT_ROOT_CONFIG_UNAVAILABLE") from exc
+    if len(raw) > MAX_ROOT_CONFIG_BYTES:
+        raise PreflightError("PREFLIGHT_ROOT_CONFIG_LIMIT")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreflightError("PREFLIGHT_ROOT_CONFIG_INVALID") from exc
+    if (not isinstance(document, dict) or set(document) != {"schema_version", "canonical_root"}
+            or document.get("schema_version") != 1
+            or not isinstance(document.get("canonical_root"), str)):
+        raise PreflightError("PREFLIGHT_ROOT_CONFIG_INVALID")
+    return canonical_root(Path(document["canonical_root"]))
+
+
+def canonical_root(root: Path) -> Path:
+    lexical = Path(os.path.abspath(root))
+    try:
+        leaf = lexical.lstat()
+        resolved = lexical.resolve(strict=True)
+    except OSError as exc:
+        raise PreflightError("PREFLIGHT_ROOT_UNAVAILABLE") from exc
+    if (root != lexical or stat.S_ISLNK(leaf.st_mode) or not stat.S_ISDIR(leaf.st_mode)
+            or resolved != lexical):
+        raise PreflightError("PREFLIGHT_ROOT_NONCANONICAL")
+    return lexical
+
+
 def run_authenticated_inspector(root: Path, base_sha: str, inspector_digest: str,
                                 arguments: list[str]) -> int:
     if not SHA_RE.fullmatch(base_sha) or not DIGEST_RE.fullmatch(inspector_digest):
         raise PreflightError("PREFLIGHT_INPUT_FORMAT")
-    lexical_root = Path(os.path.abspath(root))
-    if lexical_root != root or root.resolve(strict=True) != lexical_root:
-        raise PreflightError("PREFLIGHT_ROOT_NONCANONICAL")
+    root = canonical_root(root)
     if not arguments or arguments[0] != "inspect":
         raise PreflightError("PREFLIGHT_INSPECT_COMMAND_REQUIRED")
-    if option_value(arguments, "--root") != str(root):
-        raise PreflightError("PREFLIGHT_ROOT_BINDING_MISMATCH")
+    if any(reserved_option(argument, "--root") for argument in arguments[1:]):
+        raise PreflightError("PREFLIGHT_RESERVED_ROOT_ARGUMENT")
     if option_value(arguments, "--public-main-head") != base_sha:
         raise PreflightError("PREFLIGHT_BASE_BINDING_MISMATCH")
     if option_value(arguments, "--inspector-digest") != inspector_digest:
@@ -163,7 +229,8 @@ def run_authenticated_inspector(root: Path, base_sha: str, inspector_digest: str
             try:
                 stable_path = f"/dev/fd/{read_descriptor}"
                 completed = subprocess.run(
-                    [sys.executable, "-I", stable_path, *arguments],
+                    [sys.executable, "-I", stable_path, arguments[0], "--root", str(root),
+                     *arguments[1:]],
                     cwd=root, env={"LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"},
                     stdin=subprocess.DEVNULL, pass_fds=(read_descriptor,), check=False,
                 )
@@ -176,7 +243,7 @@ def run_authenticated_inspector(root: Path, base_sha: str, inspector_digest: str
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--task-root", required=True, type=Path)
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--inspector-digest", required=True)
@@ -186,8 +253,12 @@ def main(argv: list[str] | None = None) -> int:
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
     try:
+        configured_root = configured_task_root()
+        supplied_root = canonical_root(Path(os.path.abspath(args.task_root)))
+        if supplied_root != configured_root or args.task_root != configured_root:
+            raise PreflightError("PREFLIGHT_ROOT_BINDING_MISMATCH")
         return run_authenticated_inspector(
-            Path(os.path.abspath(args.task_root)), args.base_sha,
+            configured_root, args.base_sha,
             args.inspector_digest, arguments,
         )
     except (OSError, PreflightError) as exc:
