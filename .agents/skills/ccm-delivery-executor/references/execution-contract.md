@@ -24,8 +24,7 @@ Accept a task only when the root supplies all of these from one immutable
 - claim ID, generation, principal, exact issue/expiry times, branch, owner base
   SHA, exclusive capability set, and dependency evidence references;
 - a canonical compact-JSON digest for every dependency evidence object;
-- work item, public capability ID, acceptance criteria, required checks, and
-  injected reporting route;
+- work item, public capability ID, acceptance criteria, and required checks;
 - the full base contract digest (exact manifest bytes, exact `TODO.md` bytes,
   normalized acceptance and complete capability declaration) and the external
   SHA-256 digest of the inspector taken from that same admitted base.
@@ -138,20 +137,21 @@ authority remains mandatory for architecture/contract choices, new runtime
 dependencies, releases, deployments, secrets, destructive or paid actions,
 and genuine ambiguity.
 
-Telegram destinations come only from active root/user instructions. The
-pre-commit report is one or two substantive Russian lines describing the actual
-diff and completed verification. It must not claim that the commit already
-exists; a material diff change invalidates it and requires a refreshed report.
+The executor never sends Telegram messages before commit, after push, for
+candidate CI, or after merge. Telegram routing is not an executor input, and a
+missing route never blocks scoped edits, tests, state checkpoints, commits, SSH
+pushes, or candidate handoff.
 
-Post-push and post-merge reports are separate, detailed, factual Russian
-messages. They include the change and its reason, affected components/material
-files, security and authority impact (including an explicit `none` when
-applicable), actual test outcomes, known limitations/blockers/unverified work,
-exact branch and SHA, and clickable commit/PR/exact-SHA CI links. A merge report
-also identifies source/target context and the exact merge SHA. Pending CI is
-reported as pending and followed by its final result; it is never presented as
-successful in advance.
+The root controller alone sends exactly one factual merge report after the
+hosting provider has confirmed the branch merge and every required post-merge
+CI check has completed successfully on the exact merge SHA. The report binds
+the change and reason, affected components/material files, security and
+authority impact, actual review and test outcomes, known limitations/blockers/
+unverified work, source/target context, reviewed candidate SHA, exact merge SHA,
+and clickable merge commit, PR, and exact merge-SHA CI links.
 
-No report contains secrets, credentials, private payloads, or routing, and no
-plan or expected effect is described as completed. This public reference
+Pending, failed, cancelled, or unverified post-merge CI produces no Telegram
+message. A correction is allowed only for an already sent merge report. No
+report contains secrets, credentials, private payloads, or routing, and no plan
+or expected effect is described as completed. This public reference
 intentionally contains no chat or topic IDs.
