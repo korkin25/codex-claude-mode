@@ -1,0 +1,60 @@
+{
+  "document_type": "ccm-delivery-execution-state",
+  "schema_version": 1,
+  "repository": {
+    "id": "ccm-public",
+    "remote": "git@github.com:korkin25/codex-claude-mode.git",
+    "default_branch": "main"
+  },
+  "admission": {
+    "controller_commit_sha": "88869dd46ccb9d21633db5d23a227f98af0a1e7b",
+    "claim_digest": "sha256:35ef194347bdf095b4bdc2641ea4252f689ae139525997538e5494a0af4857cb",
+    "claim_id": "claim-ccm-serve-1",
+    "claim_generation": 1,
+    "predecessor": null,
+    "owner_principal": "root-delivery-agent",
+    "work_item_id": "CCM-SERVE-001",
+    "public_capability_id": "ccm.serve.v1",
+    "capabilities": [
+      "ccm.public-client"
+    ],
+    "base_sha": "f2efcc896cd9924444aa1b990d4ba69f3ef0c2b9",
+    "branch": "feature/ccm-serve-001",
+    "issued_at": "2026-08-17T11:50:00Z",
+    "expires_at": "2026-08-17T15:50:00Z",
+    "dependency_evidence_refs": [
+      "evidence-private-base-c8c1589"
+    ],
+    "dependency_evidence": [
+      {
+        "id": "evidence-private-base-c8c1589",
+        "digest": "sha256:a7ca7e2bc0bba8688508cfd9f86c1d8bca9ca526e56cc271ecf9fbd46c2d5bd2"
+      }
+    ],
+    "acceptance_digest": "sha256:86998487e84accc9bfe9ebefe1759ff60ef37febae4a523fc8d4f97ecf55ed74",
+    "contract_digest": "sha256:cadeda99e2a702e1b4419863834990e595249e1b58ba28f7c7596d579ef83e9e",
+    "inspector_digest": "sha256:abf706e2ab1f81cb4917332b7ec314f907d814030e1644970f25c59fbe9c773d",
+    "required_checks": [
+      "Public capability manifest",
+      "Rust 1.95 · linux-x86_64",
+      "Rust 1.95 · macos-arm64"
+    ]
+  },
+  "execution": {
+    "phase": "claimed",
+    "completed_acceptance": [],
+    "remaining_work": [
+      "Implement the headless serve process, its owner-only Unix socket, and persistent projection.",
+      "Add stale-socket, cleanup, monotonic-cursor reconnect, and snapshot-fallback tests.",
+      "Run all manifest-required checks and prepare the exact pushed candidate."
+    ],
+    "completed_checks": []
+  },
+  "checkpoint": {
+    "sequence": 1,
+    "kind": "claim",
+    "parent_sha": "f2efcc896cd9924444aa1b990d4ba69f3ef0c2b9",
+    "updated_at": "2026-08-17T12:07:40Z",
+    "next_action": "Run the authenticated preflight, then implement only CCM-SERVE-001 within the admitted content scope."
+  }
+}
