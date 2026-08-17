@@ -187,11 +187,16 @@ def valid_branch(branch: str | None) -> bool:
     )
 
 
+def schema_version_one(document: dict[str, Any]) -> bool:
+    value = document.get("schema_version")
+    return type(value) is int and value == 1
+
+
 def validate_state(state: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     strict_object(state, TOP_KEYS, "state", errors)
     if state.get("document_type") != "ccm-delivery-execution-state": errors.append("DOCUMENT_TYPE")
-    if state.get("schema_version") != 1: errors.append("SCHEMA_VERSION")
+    if not schema_version_one(state): errors.append("SCHEMA_VERSION")
     repository = strict_object(state.get("repository"), REPOSITORY_KEYS, "repository", errors)
     if repository.get("id") != "ccm-public": errors.append("REPOSITORY_ID")
     if repository.get("remote") != REMOTE: errors.append("REPOSITORY_REMOTE")
@@ -663,7 +668,7 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         errors.append(f"CONTROLLER_STATE_TYPE {label}")
     if evidence_doc.get("document_type") != "evidence-registry":
         errors.append(f"CONTROLLER_EVIDENCE_TYPE {label}")
-    if any(document.get("schema_version") != 1 for document in (claims_doc, state_doc, evidence_doc)):
+    if not all(schema_version_one(document) for document in (claims_doc, state_doc, evidence_doc)):
         errors.append(f"CONTROLLER_SCHEMA_VERSION {label}")
 
     repositories = unique_index(state_doc.get("repositories"), f"{label}.repositories", errors)

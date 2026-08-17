@@ -341,6 +341,37 @@ class ExecutionStateTests(unittest.TestCase):
             state["checkpoint"]["kind"] = "blocked" if kind != "blocked" else "progress"
             self.assertIn("PHASE_KIND_MISMATCH", inspector.validate_state(state))
 
+    def test_all_tracked_schema_versions_require_exact_integer_one(self):
+        for value in (True, False):
+            with self.subTest(document="execution-state", value=value):
+                state = self.state(); state["schema_version"] = value
+                self.assertIn("SCHEMA_VERSION", inspector.validate_state(state))
+
+            for filename in ("claims.json", "state.json", "evidence.json"):
+                with self.subTest(document=filename, value=value):
+                    documents = self.controller_documents([self.claim])
+                    documents[filename]["schema_version"] = value
+                    errors = []
+                    inspector.validate_controller_snapshot(
+                        documents, datetime.fromisoformat("2026-08-17T00:00:00+00:00"),
+                        "schema-test", errors,
+                    )
+                    self.assertIn(
+                        "CONTROLLER_SCHEMA_VERSION schema-test",
+                        errors,
+                    )
+
+    def test_all_tracked_schema_versions_accept_exact_integer_one(self):
+        state = self.state()
+        self.assertIs(type(state["schema_version"]), int)
+        self.assertEqual(1, state["schema_version"])
+        for document in self.controller_documents([self.claim]).values():
+            self.assertIs(type(document["schema_version"]), int)
+            self.assertEqual(1, document["schema_version"])
+        head = self.commit_state(state)
+        result = self.inspect(state, head)
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
     def test_candidate_rejects_failed_check_and_remaining_work(self):
         state = self.state(); state["execution"]["phase"] = "candidate"; state["checkpoint"]["kind"] = "candidate"
         state["execution"]["completed_checks"].append({"name": self.required_checks[1], "command": "test", "outcome": "failed"})

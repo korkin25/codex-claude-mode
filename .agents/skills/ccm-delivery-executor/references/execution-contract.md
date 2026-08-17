@@ -64,6 +64,9 @@ authenticated canonical root after rejecting all such forms.
 The tracked state filename is derived from the validated claim ID. It is an
 execution/recovery record, not the authoritative claim or capability registry.
 It contains no authorization payload beyond identifiers and digests.
+The tracked execution state and every claims, delivery-state, and evidence
+controller snapshot require `schema_version` with exact JSON integer type and
+value `1`; booleans are rejected rather than treated as integer aliases.
 
 - One document represents one claim generation and one branch. Generation 1
   begins at the exact public base; later generations explicitly chain to the
