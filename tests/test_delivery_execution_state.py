@@ -268,6 +268,41 @@ class ExecutionStateTests(unittest.TestCase):
             status = preflight.main(arguments)
         self.assertEqual(1, status)
 
+    def root_config(self, raw: str):
+        config = self.root.parent / "delivery-executor.json"
+        config.write_text(raw, encoding="utf-8")
+        config.chmod(0o600)
+        return mock.patch.object(preflight, "owner_root_config", return_value=config)
+
+    def test_preflight_root_config_rejects_duplicate_canonical_root(self):
+        raw = (f'{{"schema_version":1,"canonical_root":{json.dumps(str(self.root))},'
+               f'"canonical_root":{json.dumps(str(self.controller))}}}')
+        with self.root_config(raw), self.assertRaisesRegex(
+                preflight.PreflightError, "PREFLIGHT_ROOT_CONFIG_DUPLICATE_KEY canonical_root"):
+            preflight.configured_task_root()
+
+    def test_preflight_root_config_rejects_duplicate_schema_version(self):
+        raw = (f'{{"schema_version":1,"schema_version":2,'
+               f'"canonical_root":{json.dumps(str(self.root))}}}')
+        with self.root_config(raw), self.assertRaisesRegex(
+                preflight.PreflightError, "PREFLIGHT_ROOT_CONFIG_DUPLICATE_KEY schema_version"):
+            preflight.configured_task_root()
+
+    def test_preflight_root_config_rejects_boolean_schema_versions(self):
+        for value in ("true", "false"):
+            with self.subTest(value=value):
+                raw = (f'{{"schema_version":{value},'
+                       f'"canonical_root":{json.dumps(str(self.root))}}}')
+                with self.root_config(raw), self.assertRaisesRegex(
+                        preflight.PreflightError, "PREFLIGHT_ROOT_CONFIG_INVALID"):
+                    preflight.configured_task_root()
+
+    def test_preflight_root_config_accepts_integer_schema_version_one(self):
+        raw = (f'{{"schema_version":1,'
+               f'"canonical_root":{json.dumps(str(self.root))}}}')
+        with self.root_config(raw):
+            self.assertEqual(self.root, preflight.configured_task_root())
+
     def test_inspector_parser_rejects_abbreviated_root(self):
         arguments = ["inspect", "--roo", str(self.root), "--state", str(self.state_path),
                      "--at", "2026-08-17T00:00:00Z", "--remote-head", self.base,

@@ -149,6 +149,15 @@ def owner_root_config() -> Path:
     return owner_home.joinpath(*ROOT_CONFIG_SUFFIX)
 
 
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise PreflightError(f"PREFLIGHT_ROOT_CONFIG_DUPLICATE_KEY {key}")
+        document[key] = value
+    return document
+
+
 def configured_task_root() -> Path:
     """Load the private owner-selected root from a fixed, non-symlink configuration file."""
     config = owner_root_config()
@@ -176,10 +185,11 @@ def configured_task_root() -> Path:
     if len(raw) > MAX_ROOT_CONFIG_BYTES:
         raise PreflightError("PREFLIGHT_ROOT_CONFIG_LIMIT")
     try:
-        document = json.loads(raw)
+        document = json.loads(raw, object_pairs_hook=unique_json_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PreflightError("PREFLIGHT_ROOT_CONFIG_INVALID") from exc
     if (not isinstance(document, dict) or set(document) != {"schema_version", "canonical_root"}
+            or type(document.get("schema_version")) is not int
             or document.get("schema_version") != 1
             or not isinstance(document.get("canonical_root"), str)):
         raise PreflightError("PREFLIGHT_ROOT_CONFIG_INVALID")

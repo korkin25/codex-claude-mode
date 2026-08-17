@@ -90,6 +90,8 @@ env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
 The active private ROOT/user configuration must select the fixed canonical
 private clone in `~/.config/codex-claude-mode/delivery-executor.json` (mode
 `0600`, exact schema `{"schema_version":1,"canonical_root":"/absolute/path"}`).
+Duplicate JSON keys are invalid, and `schema_version` is the JSON integer `1`,
+never a boolean or a coercible value.
 `--task-root` is only an equality assertion against that owner configuration;
 an alternate clone with the same origin is not authoritative. Do not pass
 `--root` after `--`: the launcher rejects exact, attached, repeated, and

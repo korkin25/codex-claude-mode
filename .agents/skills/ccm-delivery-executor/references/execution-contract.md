@@ -51,7 +51,9 @@ owner-only configuration
 `~/.config/codex-claude-mode/delivery-executor.json`, resolved from the OS
 account rather than `HOME` or `XDG_CONFIG_HOME`. The file is a canonical,
 non-symlink regular file owned by the effective user with mode `0600` and exact
-schema `{"schema_version":1,"canonical_root":"/absolute/path"}`. A supplied
+schema `{"schema_version":1,"canonical_root":"/absolute/path"}`. Duplicate
+keys fail closed and `schema_version` must have exact JSON integer
+type and value `1`; JSON booleans are not accepted as integer aliases. A supplied
 `--task-root` is only checked for exact lexical and resolved equality with that
 configured root. The downstream argument list cannot nominate `--root` in
 exact, attached, repeated, or abbreviated form; preflight injects its one
