@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/korkin25/codex-claude-mode/.agents/skills/ccm-delivery-executor/references/execution-state.schema.json",
+  "title": "CCM delivery execution checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document_type", "schema_version", "repository", "admission", "execution", "checkpoint"],
+  "properties": {
+    "document_type": { "const": "ccm-delivery-execution-state" },
+    "schema_version": { "const": 1 },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "remote", "default_branch"],
+      "properties": {
+        "id": { "const": "ccm-public" },
+        "remote": { "const": "git@github.com:korkin25/codex-claude-mode.git" },
+        "default_branch": { "const": "main" }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controller_commit_sha", "claim_digest", "claim_id", "claim_generation", "predecessor", "owner_principal", "work_item_id", "public_capability_id", "capabilities", "base_sha", "branch", "issued_at", "expires_at", "dependency_evidence_refs", "dependency_evidence", "acceptance_digest", "contract_digest", "inspector_digest", "required_checks"],
+      "properties": {
+        "controller_commit_sha": { "$ref": "#/$defs/sha" },
+        "claim_digest": { "$ref": "#/$defs/digest" },
+        "claim_id": { "$ref": "#/$defs/id" },
+        "claim_generation": { "type": "integer", "minimum": 1 },
+        "predecessor": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["claim_id", "generation", "checkpoint_sha"],
+              "properties": {
+                "claim_id": { "$ref": "#/$defs/id" },
+                "generation": { "type": "integer", "minimum": 1 },
+                "checkpoint_sha": { "$ref": "#/$defs/sha" }
+              }
+            }
+          ]
+        },
+        "owner_principal": { "$ref": "#/$defs/id" },
+        "work_item_id": { "type": "string", "pattern": "^CCM-[A-Z]+-[0-9]{3}$" },
+        "public_capability_id": { "type": "string", "pattern": "^ccm\\.[a-z0-9]+(?:[.-][a-z0-9]+)*\\.v[1-9][0-9]*$" },
+        "capabilities": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "base_sha": { "$ref": "#/$defs/sha" },
+        "branch": { "type": "string", "minLength": 1 },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "dependency_evidence_refs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/evidenceRef" } },
+        "dependency_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "digest"],
+            "properties": {
+              "id": { "$ref": "#/$defs/evidenceRef" },
+              "digest": { "$ref": "#/$defs/digest" }
+            }
+          }
+        },
+        "acceptance_digest": { "$ref": "#/$defs/digest" },
+        "contract_digest": { "$ref": "#/$defs/digest" },
+        "inspector_digest": { "$ref": "#/$defs/digest" },
+        "required_checks": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "completed_acceptance", "remaining_work", "completed_checks"],
+      "properties": {
+        "phase": { "enum": ["claimed", "implementing", "checkpointed", "candidate", "blocked"] },
+        "completed_acceptance": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "remaining_work": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "completed_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "command", "outcome"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "command": { "type": "string", "minLength": 1 },
+              "outcome": { "enum": ["passed", "failed"] }
+            }
+          }
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "kind", "parent_sha", "updated_at", "next_action"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "kind": { "enum": ["claim", "progress", "planned_restart", "candidate", "blocked"] },
+        "parent_sha": { "$ref": "#/$defs/sha" },
+        "updated_at": { "$ref": "#/$defs/timestamp" },
+        "next_action": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "evidenceRef": { "type": "string", "pattern": "^evidence-[a-z0-9][a-z0-9._-]*$" },
+    "timestamp": { "type": "string", "format": "date-time" }
+  }
+}

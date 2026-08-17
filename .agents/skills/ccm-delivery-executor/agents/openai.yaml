@@ -1,0 +1,4 @@
+interface:
+  display_name: "CCM Delivery Executor"
+  short_description: "Resume one claimed CCM task safely"
+  default_prompt: "Use $ccm-delivery-executor to resume or execute one admitted CCM task from its exact claim."
