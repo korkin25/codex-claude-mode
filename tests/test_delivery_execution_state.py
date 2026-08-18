@@ -72,7 +72,7 @@ class ExecutionStateTests(unittest.TestCase):
         self.claim = {"id": "claim-serve-1", "work_item_id": "CCM-SERVE-001", "owner_principal": "agent-1",
             "repository_id": "ccm-public", "base_sha": self.base, "branch": "task/serve",
             "capabilities": ["ccm.public-client"], "generation": 1, "status": "active",
-            "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2030-01-01T00:00:00Z",
+            "issued_at": "2026-08-16T22:00:00Z", "expires_at": "2026-08-17T04:00:00Z",
             "dependency_evidence_refs": ["evidence-dependency"]}
         self.controller_head = self.commit_controller([self.claim])
         self.state_path = Path("delivery/executions/claim-serve-1.json")
@@ -146,7 +146,7 @@ class ExecutionStateTests(unittest.TestCase):
                           "remaining_work": ["Implement acceptance criteria"],
                           "completed_checks": [{"name": self.required_checks[0], "command": "read TODO", "outcome": "passed"}]},
             "checkpoint": {"sequence": 1, "kind": "claim", "parent_sha": self.base,
-                           "updated_at": "2026-01-01T00:01:00Z", "next_action": "Implement the task"}}
+                           "updated_at": "2026-08-16T22:01:00Z", "next_action": "Implement the task"}}
 
     def commit_state(self, state, path=None):
         path = path or self.state_path; target = self.root / path; target.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +169,7 @@ class ExecutionStateTests(unittest.TestCase):
         second_state = self.state(predecessor={"claim_id": second_predecessor_id,
             "generation": 1, "checkpoint_sha": first_head})
         second_state["checkpoint"].update({"parent_sha": first_head,
-            "updated_at": "2026-01-01T00:02:00Z"})
+            "updated_at": "2026-08-16T22:02:00Z"})
         second_head = self.commit_state(second_state, second_path)
 
         second_claim["status"] = "revoked"
@@ -181,7 +181,7 @@ class ExecutionStateTests(unittest.TestCase):
         third_state = self.state(predecessor={"claim_id": "claim-serve-2",
             "generation": 2, "checkpoint_sha": second_head})
         third_state["checkpoint"].update({"parent_sha": second_head,
-            "updated_at": "2026-01-01T00:03:00Z"})
+            "updated_at": "2026-08-16T22:03:00Z"})
         third_head = self.commit_state(third_state, third_path)
         return third_state, third_path, third_head, first_claim, second_claim, third_claim
 
@@ -514,7 +514,7 @@ class ExecutionStateTests(unittest.TestCase):
         )
 
     def test_evidence_verified_after_claim_issuance_is_rejected(self):
-        self.evidence["verified_at"] = "2026-01-01T00:00:01Z"
+        self.evidence["verified_at"] = "2026-08-16T22:00:01Z"
         self.controller_head = self.commit_controller([self.claim])
         state = self.state()
         head = self.commit_state(state)
@@ -581,7 +581,7 @@ class ExecutionStateTests(unittest.TestCase):
         second = self.state(predecessor={"claim_id": "claim-serve-1", "generation": 1,
                                          "checkpoint_sha": predecessor_head})
         second["checkpoint"]["parent_sha"] = predecessor_head
-        second["checkpoint"]["updated_at"] = "2026-01-01T00:02:00Z"
+        second["checkpoint"]["updated_at"] = "2026-08-16T22:02:00Z"
         head = self.commit_state(second, second_path)
         result = self.inspect(second, head, path=second_path)
         self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
@@ -618,7 +618,7 @@ class ExecutionStateTests(unittest.TestCase):
         second_path = Path("delivery/executions/claim-serve-2.json")
         state = self.state(predecessor={"claim_id": invalid["id"], "generation": 1,
                                         "checkpoint_sha": first_head})
-        state["checkpoint"].update({"parent_sha": first_head, "updated_at": "2026-01-01T00:02:00Z"})
+        state["checkpoint"].update({"parent_sha": first_head, "updated_at": "2026-08-16T22:02:00Z"})
         head = self.commit_state(state, second_path)
         result = self.inspect(state, head, path=second_path)
         self.assertIn("FORMAT controller.claim.claim-serve-1.status", result["errors"])
@@ -632,7 +632,7 @@ class ExecutionStateTests(unittest.TestCase):
         second_path = Path("delivery/executions/claim-serve-2.json")
         second = self.state(predecessor={"claim_id": "claim-serve-1", "generation": 1,
                                          "checkpoint_sha": predecessor_head})
-        second["checkpoint"].update({"parent_sha": predecessor_head, "updated_at": "2026-01-01T00:02:00Z"})
+        second["checkpoint"].update({"parent_sha": predecessor_head, "updated_at": "2026-08-16T22:02:00Z"})
         head = self.commit_state(second, second_path)
         result = self.inspect(second, head, path=second_path)
         self.assertIn("PREDECESSOR_ADMISSION_IDENTITY_MISMATCH", result["errors"])
@@ -673,7 +673,7 @@ class ExecutionStateTests(unittest.TestCase):
         first = self.state(); first["execution"]["completed_acceptance"] = self.acceptance
         first_head = self.commit_state(first)
         second = copy.deepcopy(first); second["checkpoint"].update({"sequence": 2, "kind": "progress",
-            "parent_sha": first_head, "updated_at": "2026-01-01T00:01:00Z"})
+            "parent_sha": first_head, "updated_at": "2026-08-16T22:01:00Z"})
         second["execution"].update({"phase": "implementing", "completed_acceptance": [], "completed_checks": []})
         head = self.commit_state(second)
         result = self.inspect(second, head)
@@ -682,7 +682,7 @@ class ExecutionStateTests(unittest.TestCase):
         self.assertIn("CHECKPOINT_TIME_NOT_MONOTONIC", result["errors"])
 
     def test_checkpoint_from_future_is_rejected(self):
-        state = self.state(); state["checkpoint"]["updated_at"] = "2027-01-01T00:00:00Z"
+        state = self.state(); state["checkpoint"]["updated_at"] = "2026-08-17T01:00:00Z"
         head = self.commit_state(state)
         result = self.inspect(state, head)
         self.assertIn("CHECKPOINT_FROM_FUTURE", result["errors"])
@@ -818,7 +818,7 @@ class ExecutionStateTests(unittest.TestCase):
             "owner_principal": "agent-docs", "repository_id": "ccm-public",
             "base_sha": self.base, "branch": "task/docs",
             "capabilities": ["ccm.public-docs"], "generation": 1, "status": "active",
-            "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2030-01-01T00:00:00Z",
+            "issued_at": "2026-08-16T22:00:00Z", "expires_at": "2026-08-17T04:00:00Z",
             "dependency_evidence_refs": []}
         record.update(overrides)
         return record
@@ -828,7 +828,7 @@ class ExecutionStateTests(unittest.TestCase):
             "owner_principal": "agent-contracts", "repository_id": "ccm-multi",
             "base_sha": "c" * 40, "branch": "task/contracts",
             "capabilities": ["multi.contracts"], "generation": 1, "status": "active",
-            "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2030-01-01T00:00:00Z",
+            "issued_at": "2026-08-16T22:00:00Z", "expires_at": "2026-08-17T04:00:00Z",
             "dependency_evidence_refs": [],
             "write_paths": ["product/contracts/**"], "content_scopes": ["shared.protocol"]}
         record.update(overrides)
@@ -849,18 +849,55 @@ class ExecutionStateTests(unittest.TestCase):
         self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
 
     def test_second_active_lane_in_owner_repository_is_rejected(self):
-        for label, other in (
+        for label, other, expected in (
             ("scoped", self.public_lane(write_paths=["docs/**"],
-                                        content_scopes=["ccm.public-docs"])),
-            ("unscoped", self.public_lane()),
+                                        content_scopes=["ccm.public-docs"]),
+             "repository=ccm-public"),
+            # An unscoped record still claims its whole repository, and now also fails
+            # closed on the content scope it never declared.
+            ("unscoped", self.public_lane(),
+             "repository=ccm-public,content_scope=undeclared"),
         ):
             with self.subTest(other=label):
                 result = self.inspect_registry([self.scope_claim(), other],
                                                self.second_public_lane)
                 self.assertFalse(result["admitted"])
                 self.assertIn(
-                    "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-docs-1 repository=ccm-public",
+                    f"CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-docs-1 {expected}",
                     result["errors"])
+
+    def unscoped(self, record):
+        return {key: value for key, value in record.items()
+                if key not in inspector.CLAIM_OPTIONAL_KEYS}
+
+    def test_lane_without_declared_content_scope_conflicts_across_repositories(self):
+        # Content scopes name shared subject matter, not files, so they are the only rule
+        # that reaches across repositories. A concurrent lane that declares none is
+        # unbounded against ours and the repository rule cannot stand in for it.
+        result = self.inspect_registry(
+            [self.scope_claim(), self.unscoped(self.controller_lane())])
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-multi-1 content_scope=undeclared",
+            result["errors"])
+
+    def test_removing_our_own_content_scopes_after_issuance_is_rejected(self):
+        # The admission binds claim identity only, so whoever writes the registry can drop
+        # our scoping fields without moving claim_digest. The conflict rule is what has to
+        # notice, and it must notice from our side of the comparison too.
+        scoped = self.scope_claim()
+        run_git(self.root, "reset", "--hard", self.base)
+        self.controller_head = self.commit_controller(
+            [self.unscoped(scoped), self.controller_lane(content_scopes=["ccm.serve.v1"])])
+        state = self.state()
+        self.assertEqual(inspector.canonical_digest(
+            {key: scoped[key] for key in inspector.CLAIM_KEYS}),
+            state["admission"]["claim_digest"])
+        result = self.inspect(state, self.commit_state(state))
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-multi-1 content_scope=undeclared",
+            result["errors"])
 
     def test_overlapping_write_path_between_lanes_is_rejected(self):
         result = self.inspect_registry(
@@ -942,10 +979,79 @@ class ExecutionStateTests(unittest.TestCase):
                          inspector.claim_conflict_reasons(
                              ours, {**elsewhere, "repository_id": "ccm-public",
                                     "content_scopes": ["ccm.public-docs"]}))
-        # A record issued before scoping existed claims its whole repository.
-        self.assertEqual(["repository=ccm-public"], inspector.claim_conflict_reasons(
-            ours, {"repository_id": "ccm-public", "work_item_id": "CCM-DOCS-001",
-                   "capabilities": ["ccm.public-docs"]}))
+        # A record issued before scoping existed claims its whole repository, which the
+        # repository rule already covers, and every content scope, which nothing else does.
+        self.assertEqual(["repository=ccm-public", "content_scope=undeclared"],
+                         inspector.claim_conflict_reasons(
+                             ours, {"repository_id": "ccm-public",
+                                    "work_item_id": "CCM-DOCS-001",
+                                    "capabilities": ["ccm.public-docs"]}))
+        self.assertEqual(["content_scope=undeclared"], inspector.claim_conflict_reasons(
+            ours, {"repository_id": "ccm-multi", "work_item_id": "CCM-REMOTE-CTL-001",
+                   "capabilities": ["multi.contracts"]}))
+        # Blindness on our own side is exactly as blind.
+        self.assertEqual(["content_scope=undeclared"], inspector.claim_conflict_reasons(
+            {key: value for key, value in ours.items() if key != "content_scopes"},
+            elsewhere))
+        for malformed in ([], "ccm.serve.v1", ["ccm.serve.v1", ""], ["ccm.serve.v1", 1], None):
+            with self.subTest(content_scopes=malformed):
+                self.assertEqual(["content_scope=undeclared"],
+                                 inspector.claim_conflict_reasons(
+                                     ours, {**elsewhere, "content_scopes": malformed}))
+
+    def test_more_active_lanes_than_the_controller_grants_are_rejected(self):
+        # The controller grants at most three concurrent lanes; the numbers are spelled
+        # out rather than read back from the module so widening one is a failing test.
+        lanes = [self.scope_claim()] + [
+            self.controller_lane(id=f"claim-multi-{index}",
+                                 write_paths=[f"product/contracts-{index}/**"],
+                                 content_scopes=[f"shared.protocol-{index}"])
+            for index in range(3)]
+        result = self.inspect_registry(lanes)
+        self.assertFalse(result["admitted"])
+        self.assertIn("CONTROLLER_ACTIVE_CLAIM_LIMIT controller active=4 max=3",
+                      result["errors"])
+        result = self.inspect_registry(lanes[:3])
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
+    def test_lease_longer_than_the_controller_grants_is_rejected(self):
+        # issued_at is 2026-08-16T22:00:00Z, so twelve hours end at 2026-08-17T10:00:00Z.
+        for label, expires, expected in (
+            ("at-the-limit", "2026-08-17T10:00:00Z", None),
+            ("one-second-over", "2026-08-17T10:00:01Z",
+             "CLAIM_LEASE_DURATION controller.claim.claim-serve-1"),
+        ):
+            with self.subTest(case=label):
+                result = self.inspect_registry([self.scope_claim(expires_at=expires)])
+                if expected is None:
+                    self.assertEqual(("clean", True),
+                                     (result["classification"], result["admitted"]))
+                else:
+                    self.assertFalse(result["admitted"])
+                    self.assertIn(expected, result["errors"])
+
+    def test_changed_claim_is_rejected_even_when_its_lineage_is_unusable(self):
+        # A duplicated capability drops the record out of its own lineage, so the
+        # recursive state walk never reaches it. The direct binding check is then the
+        # only guard that can still see the record no longer matches the admission.
+        tampered = copy.deepcopy(self.claim)
+        tampered["capabilities"] = ["ccm.public-client", "ccm.public-client"]
+        self.controller_head = self.commit_controller([tampered])
+        state = self.state()
+        result = self.inspect(state, self.commit_state(state))
+        self.assertFalse(result["admitted"])
+        self.assertIn("CONTROLLER_CLAIM_LINEAGE_UNAVAILABLE", result["errors"])
+        self.assertIn("CONTROLLER_CLAIM_REVOKED_OR_CHANGED", result["errors"])
+        self.assertIn("CLAIM_BINDING_MISMATCH", result["errors"])
+
+    def test_claim_digest_is_checked_even_when_its_lineage_is_unusable(self):
+        tampered = copy.deepcopy(self.claim)
+        tampered["capabilities"] = ["ccm.public-client", "ccm.public-client"]
+        self.controller_head = self.commit_controller([tampered])
+        state = self.state(claim_digest="sha256:" + "0" * 64)
+        result = self.inspect(state, self.commit_state(state))
+        self.assertFalse(result["admitted"])
+        self.assertIn("CLAIM_DIGEST_MISMATCH", result["errors"])
 
     def aor_baseline(self, index, *, lineage=True, **overrides):
         """One AOR baseline evidence record shaped exactly like the controller writes it."""
@@ -1085,6 +1191,69 @@ class ExecutionStateTests(unittest.TestCase):
                 self.assertFalse(result["admitted"])
                 self.assertIn(expected, result["errors"])
 
+    def observing(self, records, observed_id):
+        """Extend the snapshot with an AOR baseline chain the controller says it observed."""
+        def mutate(documents):
+            documents["evidence.json"]["evidence"].extend(copy.deepcopy(records))
+            documents["state.json"]["external_capabilities"].append(
+                {"id": inspector.AOR_BASELINE_EXTERNAL, "state": "available",
+                 "evidence_refs": [observed_id], "blocks": []})
+        return mutate
+
+    def test_observed_aor_baseline_must_be_the_lineage_tip(self):
+        # Parsing the chain decides nothing unless something has to point at its end.
+        chain = [self.aor_baseline(index) for index in range(3)]
+        result = self.inspect_registry([self.claim], self.observing(chain, chain[2]["id"]))
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+        for label, observed in (("origin", chain[0]), ("middle", chain[1])):
+            with self.subTest(observed=label):
+                result = self.inspect_registry(
+                    [self.claim], self.observing(chain, observed["id"]))
+                self.assertFalse(result["admitted"])
+                self.assertIn(
+                    f"CONTROLLER_AOR_BASELINE_NOT_LINEAGE_TIP controller "
+                    f"observed={observed['id']} tip={chain[2]['id']}", result["errors"])
+
+    def test_newest_baseline_cannot_shed_its_lineage_to_stay_the_tip(self):
+        # Dropping the key leaves a shorter, still contiguous chain behind it.
+        chain = [self.aor_baseline(0), self.aor_baseline(1),
+                 self.aor_baseline(2, lineage=False)]
+        result = self.inspect_registry([self.claim], self.observing(chain, chain[2]["id"]))
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            f"CONTROLLER_AOR_BASELINE_NOT_LINEAGE_TIP controller "
+            f"observed={chain[2]['id']} tip={chain[1]['id']}", result["errors"])
+
+    def test_broken_chain_leaves_no_tip_to_observe(self):
+        first, second = self.aor_baseline(0), self.aor_baseline(1)
+        sibling = copy.deepcopy(second)
+        sibling["id"] = "evidence-aor-baseline-2222222"
+        result = self.inspect_registry(
+            [self.claim], self.observing([first, second, sibling], second["id"]))
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            f"CONTROLLER_AOR_BASELINE_NOT_LINEAGE_TIP controller "
+            f"observed={second['id']} tip=None", result["errors"])
+
+    def test_pre_lineage_baseline_observation_is_still_admitted(self):
+        # The registry is append-only: a snapshot older than the lineage carries no chain
+        # for the observed record to head, and rejecting it would reject its own history.
+        record = self.aor_baseline(0, lineage=False)
+        result = self.inspect_registry([self.claim], self.observing([record], record["id"]))
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
+    def test_observed_baseline_must_be_a_single_reference(self):
+        chain = [self.aor_baseline(index) for index in range(2)]
+        def mutate(documents):
+            documents["evidence.json"]["evidence"].extend(copy.deepcopy(chain))
+            documents["state.json"]["external_capabilities"].append(
+                {"id": inspector.AOR_BASELINE_EXTERNAL, "state": "available",
+                 "evidence_refs": [chain[0]["id"], chain[1]["id"]], "blocks": []})
+        result = self.inspect_registry([self.claim], mutate)
+        self.assertFalse(result["admitted"])
+        self.assertIn("CONTROLLER_AOR_BASELINE_EVIDENCE_NOT_SINGLETON controller",
+                      result["errors"])
+
     def historical_evidence(self, repository_id, merge_sha, checks, **overrides):
         record = {"id": "evidence-historical", "kind": "merge_ci",
             "repository_id": repository_id, "merge_sha": merge_sha,
@@ -1153,11 +1322,80 @@ class ExecutionStateTests(unittest.TestCase):
             "EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE controller.evidence.evidence-dependency",
             result["errors"])
 
-    def test_evidence_key_table_mirrors_the_controller_schema(self):
-        self.assertEqual({"lineage"}, inspector.EVIDENCE_OPTIONAL_KEYS)
-        self.assertEqual({"type", "generation", "supersedes"}, inspector.EVIDENCE_LINEAGE_KEYS)
-        self.assertEqual({"aor_baseline"}, inspector.EVIDENCE_LINEAGE_TYPES)
-        self.assertFalse(inspector.EVIDENCE_KEYS & inspector.EVIDENCE_OPTIONAL_KEYS)
+    def test_unconsumed_pre_contract_merge_is_not_exempted(self):
+        # Minimality: `evidence-common-base-5db306d` is defined in the controller registry
+        # but referenced by no work item, external capability or claim, and normative
+        # validation only ever runs on a claim's dependency evidence. Its merge therefore
+        # needs no exemption, and carrying one would widen the tables for nothing.
+        unconsumed = "5db306d8a8d486b6047d8e2e944181c320f6c504"
+        self.assertNotIn(("ccm-public", unconsumed), inspector.HISTORICAL_CHECKS)
+        self.assertNotIn(("ccm-public", unconsumed), inspector.HISTORICAL_UNCONTRACTED)
+        errors = self.evidence_errors(self.historical_evidence(
+            "ccm-public", unconsumed, inspector.BASELINE_RUST_CHECKS))
+        self.assertIn("EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE evidence", errors)
+        self.assertIn("EVIDENCE_CHECK_CONTRACT_REQUIRED evidence", errors)
+
+    def test_unhashable_merge_sha_yields_a_verdict_not_a_traceback(self):
+        # Both historical tables are keyed by (repository, merge SHA) and the registry
+        # value arrives unnormalised, so a list or object would raise inside the lookup.
+        for merge_sha in (["a" * 40], {"sha": "a" * 40}, 7, None, "A" * 40):
+            with self.subTest(merge_sha=repr(merge_sha)):
+                record = self.historical_evidence(
+                    "ccm-public", "a" * 40, inspector.BASELINE_RUST_CHECKS)
+                record["merge_sha"] = merge_sha
+                errors = self.evidence_errors(record)
+                self.assertIn("FORMAT evidence.merge_sha", errors)
+                self.assertIn("EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE evidence", errors)
+                self.assertIn("EVIDENCE_CHECK_CONTRACT_REQUIRED evidence", errors)
+        self.evidence["merge_sha"] = ["d" * 40]
+        result = self.inspect_registry([self.claim])
+        self.assertFalse(result["admitted"])
+        self.assertIn("FORMAT controller.evidence.evidence-dependency.merge_sha",
+                      result["errors"])
+
+    def test_pre_manifest_merge_still_binds_its_commit_to_public_history(self):
+        # HISTORICAL_UNCONTRACTED admits a null check_contract and nothing else. The merge
+        # must still be a commit this repository actually contains, which is what makes
+        # its SHA measurable here at all.
+        merge_sha = sorted(inspector.HISTORICAL_UNCONTRACTED)[0][1]
+        self.evidence.update({"repository_id": "ccm-public", "merge_sha": merge_sha})
+        self.evidence["ci"].update({
+            "head_sha": merge_sha, "required_checks": sorted(inspector.BASELINE_RUST_CHECKS),
+            "url": f"{inspector.REPOSITORY_WEB['ccm-public']}/actions/runs/1"})
+        result = self.inspect_registry([self.claim])
+        self.assertFalse(result["admitted"])
+        self.assertIn("EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE evidence-dependency",
+                      result["errors"])
+        self.assertNotIn("EVIDENCE_CHECK_CONTRACT_REQUIRED controller.evidence.evidence-dependency",
+                         result["errors"])
+        # A reachable pre-manifest merge keeps its exemption.
+        self.evidence["merge_sha"] = self.base
+        self.evidence["ci"]["head_sha"] = self.base
+        result = self.inspect_registry([self.claim])
+        self.assertNotIn("EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE evidence-dependency",
+                         result["errors"])
+
+    def test_optional_key_tables_are_the_only_widening_of_a_strict_object(self):
+        # These tables mean nothing on their own; they mean something only through
+        # strict_object. A key that is optional and required at once would still be
+        # reported MISSING, and a key in neither table is UNKNOWN however plausible.
+        for keys, optional in ((inspector.EVIDENCE_KEYS, inspector.EVIDENCE_OPTIONAL_KEYS),
+                               (inspector.CLAIM_KEYS, inspector.CLAIM_OPTIONAL_KEYS)):
+            with self.subTest(optional=sorted(optional)):
+                self.assertTrue(optional)
+                self.assertFalse(keys & optional)
+                complete = dict.fromkeys(keys | optional)
+                errors = []
+                inspector.strict_object(complete, keys, "record", errors, optional=optional)
+                self.assertEqual([], errors)
+                errors = []
+                inspector.strict_object({**complete, "smuggled": None}, keys, "record",
+                                        errors, optional=optional)
+                self.assertEqual(["UNKNOWN record: smuggled"], errors)
+                errors = []
+                inspector.strict_object(dict.fromkeys(optional), keys, "record",
+                                        errors, optional=optional)
+                self.assertEqual([f"MISSING record: {','.join(sorted(keys))}"], errors)
 
 
 if __name__ == "__main__": unittest.main()

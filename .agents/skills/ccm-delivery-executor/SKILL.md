@@ -122,8 +122,13 @@ snapshot. A claim may carry the optional bounded-lane scope fields
 `write_paths` and `content_scopes`; the admitted claim must be active and every
 other active claim must stay disjoint from it (different owner repository, work
 item, and exclusive capability, no overlapping write path inside one
-repository, no shared content scope), and a claim without scope fields claims
-its whole repository. The claimed work must already be `ready`, its dependencies `done`,
+repository, no shared content scope). A claim without `write_paths` claims its
+whole repository, which the repository rule already rejects, but a claim
+without a well-formed `content_scopes` conflicts with every concurrent lane in
+any repository: content scopes are the only cross-repository rule and nothing
+bounds a lane that declares none. No registry snapshot may hold more than three
+active claims or a lease longer than twelve hours.
+The claimed work must already be `ready`, its dependencies `done`,
 and its external prerequisites `available` in the issuance snapshot. Dependency
 evidence must be `merge_ci` evidence owned by the dependency repository;
 external cross-owner evidence is accepted only through that external
@@ -137,7 +142,8 @@ optional AOR baseline `lineage` (`type`, `generation`, `supersedes`); when
 present it must be an `aor_baseline` triple on an `aor`-owned
 `evidence-aor-baseline-*` record, and the snapshot's chain must hold one record
 per generation, contiguous from one, each naming the generation it replaces.
-Each state's evidence digests
+Once a snapshot carries that chain, the baseline the controller says it
+observed must be its tip. Each state's evidence digests
 are checked against its own issuance snapshot, so later readiness or evidence
 cannot authorize an earlier claim. Every
 predecessor must have a real terminal status. Every Git
