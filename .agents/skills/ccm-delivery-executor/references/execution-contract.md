@@ -101,13 +101,30 @@ value `1`; booleans are rejected rather than treated as integer aliases.
   of the work item's capabilities. At issuance the work item is already
   `ready`, every dependency is `done`, and every external prerequisite is
   `available`. Dependency evidence is `merge_ci` evidence from the dependency
-  work item's owner repository. An external capability's exact
+  work item's owner repository, and its `required_checks` are that repository's
+  complete normative check contract. A GitHub check name comes from the
+  workflow in the merged tree, so a merge cannot have run a job added later:
+  an enumerated set of pre-contract merges, pinned by immutable repository and
+  merge SHA, instead carries the complete contract measured at that exact
+  commit, and the two of them whose tree predates the owner capability manifest
+  carry no `check_contract`. Every other record, and therefore every new merge,
+  must match the current contract exactly. An external capability's exact
   `evidence_refs` are the only normative representation of a cross-owner
   evidence relation; owner relationships are never inferred from an ID or
   prose. Evidence `verified_at` is no later than claim `issued_at`, and the
   claim/state issue, expiry, and checkpoint ordering remains valid. Historical
   evidence objects and their canonical digests are checked at their issuance
-  snapshot, never filled from a later registry. Every lineage
+  snapshot, never filled from a later registry. An evidence record may
+  additionally carry the AOR baseline `lineage`; it is optional because the
+  append-only registry keeps baseline records written before the lineage
+  existed, and when present it is exactly `type`, `generation`, and
+  `supersedes`: an `aor_baseline` type on an `aor`-owned
+  `evidence-aor-baseline-*` record, an integer generation of at least one, and
+  either `null` at generation one or the evidence ID of the record it replaces.
+  Any other key inside it still fails closed. Within one snapshot the chain is
+  append-only: one record per generation, contiguous from one, each naming the
+  immediately preceding generation, so forks, gaps, dangling supersessions, and
+  cycles fail closed. Every lineage
   predecessor is strictly terminal (`released`, `revoked`, or `expired`); an
   invented status is not closure.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission

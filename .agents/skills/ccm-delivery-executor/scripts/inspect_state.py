@@ -63,6 +63,13 @@ EVIDENCE_KEYS = {
     "id", "kind", "repository_id", "merge_sha", "content_digest", "ci",
     "check_contract", "verified_at", "verifier", "provenance",
 }
+# The controller stamps an explicit supersession chain onto AOR baseline evidence. The
+# key stays optional: the registry is append-only and keeps baseline records written
+# before the lineage existed, so demanding it would reject their issuance snapshots.
+EVIDENCE_OPTIONAL_KEYS = {"lineage"}
+EVIDENCE_LINEAGE_KEYS = {"type", "generation", "supersedes"}
+EVIDENCE_LINEAGE_TYPES = {"aor_baseline"}
+AOR_BASELINE_PREFIX = "evidence-aor-baseline-"
 CI_KEYS = {"provider", "run_id", "url", "head_sha", "status", "required_checks"}
 CHECK_CONTRACT_KEYS = {"path", "format", "content_digest"}
 PHASE_KIND = {
@@ -82,6 +89,28 @@ NORMATIVE_CHECKS = {
     "ccm-multi": {"Delivery governance", "Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"},
     "aor": {"capability-governance (ubuntu-latest)", "capability-governance (macos-latest)"},
 }
+# A GitHub check name comes from the workflow in the merged tree, so a merge cannot have
+# run a job that was added to its repository later. NORMATIVE_CHECKS is the contract in
+# force today; these enumerated pre-contract merges carry the complete set their own
+# `.github/workflows/ci.yml` declared, measured at that exact immutable commit. The list
+# is closed: the controller registry is append-only and every record settled after a
+# contract grew carries NORMATIVE_CHECKS, so a new merge can never present a reduced set.
+BASELINE_RUST_CHECKS = frozenset({"Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"})
+HISTORICAL_CHECKS = {
+    # codex-claude-mode before 8e33ddf added the "Public capability manifest" job.
+    ("ccm-public", "5db306d8a8d486b6047d8e2e944181c320f6c504"): BASELINE_RUST_CHECKS,
+    ("ccm-public", "2c5382035ecf84724fe796332ed1c252f1fb0bce"): BASELINE_RUST_CHECKS,
+    # ccm-multi before it gained the "Delivery governance" and manifest jobs.
+    ("ccm-multi", "c8c1589db37ae7c5f0625994d23886c7dc1afb36"): BASELINE_RUST_CHECKS,
+}
+# The same merges seen from the other side of CHECK_CONTRACT: 8e33ddf also created
+# `delivery/capabilities.json`, so a merge older than that file has no manifest to bind
+# and its null check_contract is the measured truth rather than a withheld binding.
+# Every entry is also an enumerated pre-contract merge above.
+HISTORICAL_UNCONTRACTED = frozenset({
+    ("ccm-public", "5db306d8a8d486b6047d8e2e944181c320f6c504"),
+    ("ccm-public", "2c5382035ecf84724fe796332ed1c252f1fb0bce"),
+})
 CHECK_CONTRACT = {
     "ccm-public": ("delivery/capabilities.json", "ccm-capability-manifest-v1"),
     "aor": (".delivery/capabilities.json", "aor-capability-manifest-v1"),
@@ -553,9 +582,95 @@ def unique_index(records: Any, where: str, errors: list[str]) -> dict[str, dict[
     return result
 
 
+def normative_check_sets(repository_id: Any, merge_sha: Any) -> set[frozenset[str]]:
+    """Every required-check set one exact merge of one repository may normatively carry.
+
+    The current contract always applies. An enumerated pre-contract merge additionally
+    admits the complete set its own workflow declared, keyed by the immutable merge SHA
+    rather than by a self-reported timestamp, so no other record can borrow it.
+    """
+    current = NORMATIVE_CHECKS.get(repository_id)
+    allowed = {frozenset(current)} if current is not None else set()
+    historical = HISTORICAL_CHECKS.get((repository_id, merge_sha))
+    if historical is not None:
+        allowed.add(historical)
+    return allowed
+
+
+def validate_evidence_lineage(record: dict[str, Any], where: str, errors: list[str]) -> None:
+    """Mirror the controller's per-record AOR baseline lineage rules.
+
+    The controller admits `lineage` only on AOR baseline evidence and requires the exact
+    triple there, so an unknown key inside it stays an error just like anywhere else.
+    """
+    lineage_where = f"{where}.lineage"
+    evidence_id = record.get("id")
+    if (not isinstance(evidence_id, str) or not evidence_id.startswith(AOR_BASELINE_PREFIX)
+            or record.get("repository_id") != "aor"):
+        errors.append(f"EVIDENCE_LINEAGE_SCOPE {where}")
+    lineage = strict_object(record.get("lineage"), EVIDENCE_LINEAGE_KEYS, lineage_where, errors)
+    if not lineage:
+        return
+    if lineage.get("type") not in EVIDENCE_LINEAGE_TYPES:
+        errors.append(f"EVIDENCE_LINEAGE_TYPE {lineage_where}")
+    generation = lineage.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        errors.append(f"FORMAT {lineage_where}.generation")
+        generation = None
+    supersedes = lineage.get("supersedes")
+    if supersedes is not None and (not isinstance(supersedes, str)
+                                   or not EVIDENCE_RE.fullmatch(supersedes)):
+        errors.append(f"FORMAT {lineage_where}.supersedes")
+    elif generation is not None and (generation == 1) != (supersedes is None):
+        # Generation one opens the chain and supersedes nothing; every later generation
+        # names the record it replaces.
+        errors.append(f"EVIDENCE_LINEAGE_ORIGIN {lineage_where}")
+
+
+def validate_evidence_lineage_chain(evidence: dict[str, dict[str, Any]], label: str,
+                                    errors: list[str]) -> None:
+    """Mirror the controller's append-only supersession chain across one snapshot.
+
+    Only records carrying a well-formed lineage take part: validate_evidence already
+    reports malformed ones, and a snapshot older than the lineage carries none at all.
+    A cycle cannot survive these rules, because contiguous generations plus "each record
+    names its immediate predecessor" admit exactly one line per lineage type.
+    """
+    chains: dict[str, dict[int, list[str]]] = {}
+    supersedes_by_id: dict[str, str | None] = {}
+    for evidence_id, record in sorted(evidence.items()):
+        lineage = record.get("lineage")
+        if not isinstance(lineage, dict):
+            continue
+        kind, generation, supersedes = (lineage.get("type"), lineage.get("generation"),
+                                        lineage.get("supersedes"))
+        if (kind not in EVIDENCE_LINEAGE_TYPES or not isinstance(generation, int)
+                or isinstance(generation, bool) or generation < 1
+                or (supersedes is not None and not isinstance(supersedes, str))):
+            continue
+        if supersedes is not None and supersedes not in evidence:
+            errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_MISSING {label}.evidence.{evidence_id} {supersedes}")
+        chains.setdefault(kind, {}).setdefault(generation, []).append(evidence_id)
+        supersedes_by_id[evidence_id] = supersedes
+    for kind, by_generation in sorted(chains.items()):
+        for generation, ids in sorted(by_generation.items()):
+            if len(ids) != 1:
+                errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_FORK {label} {kind} "
+                              f"generation={generation} ids={','.join(sorted(ids))}")
+        if set(by_generation) != set(range(1, len(by_generation) + 1)):
+            generations = ",".join(str(item) for item in sorted(by_generation))
+            errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_GAP {label} {kind} generations={generations}")
+        line = {generation: ids[0] for generation, ids in by_generation.items() if len(ids) == 1}
+        for generation, evidence_id in sorted(line.items()):
+            expected = None if generation == 1 else line.get(generation - 1)
+            if supersedes_by_id[evidence_id] != expected:
+                errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_ORDER {label}.evidence.{evidence_id} "
+                              f"actual={supersedes_by_id[evidence_id]} expected={expected}")
+
+
 def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: list[str],
                       *, normative: bool = True) -> None:
-    strict_object(record, EVIDENCE_KEYS, where, errors)
+    strict_object(record, EVIDENCE_KEYS, where, errors, optional=EVIDENCE_OPTIONAL_KEYS)
     text(record.get("id"), f"{where}.id", errors, EVIDENCE_RE)
     if record.get("kind") not in {"merge_ci", "external_probe"}: errors.append(f"EVIDENCE_KIND {where}")
     repository_id = text(record.get("repository_id"), f"{where}.repository_id", errors, ID_RE)
@@ -572,14 +687,14 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
     if ci.get("url") != expected_url: errors.append(f"EVIDENCE_CI_URL {where}")
     if ci.get("head_sha") != record.get("merge_sha"): errors.append(f"EVIDENCE_CI_SHA_MISMATCH {where}")
     checks = string_list(ci.get("required_checks"), f"{where}.ci.required_checks", errors, nonempty=True)
-    if normative and (repository_id not in NORMATIVE_CHECKS
-                      or set(checks) != NORMATIVE_CHECKS.get(repository_id)):
+    if normative and frozenset(checks) not in normative_check_sets(repository_id, record.get("merge_sha")):
         errors.append(f"EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE {where}")
     contract = record.get("check_contract")
     expected_contract = CHECK_CONTRACT.get(repository_id)
     if expected_contract is None and contract is not None:
         errors.append(f"EVIDENCE_CHECK_CONTRACT_UNEXPECTED {where}")
-    elif normative and expected_contract is not None and contract is None:
+    elif (normative and expected_contract is not None and contract is None
+            and (repository_id, record.get("merge_sha")) not in HISTORICAL_UNCONTRACTED):
         errors.append(f"EVIDENCE_CHECK_CONTRACT_REQUIRED {where}")
     elif contract is not None:
         contract = strict_object(contract, CHECK_CONTRACT_KEYS, f"{where}.check_contract", errors)
@@ -587,6 +702,8 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
         if (contract.get("path"), contract.get("format")) != expected_contract:
             errors.append(f"EVIDENCE_CHECK_CONTRACT_BINDING {where}")
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
+    if "lineage" in record:
+        validate_evidence_lineage(record, where, errors)
 
 
 def claim_write_paths(value: Any, where: str, errors: list[str]) -> list[str]:
@@ -789,6 +906,7 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         validate_evidence(record, at, where, errors, normative=False)
         if record.get("repository_id") not in repositories:
             errors.append(f"CONTROLLER_EVIDENCE_REPOSITORY_MISSING {where}")
+    validate_evidence_lineage_chain(evidence, label, errors)
 
     for external_id, external in externals.items():
         where = f"{label}.external.{external_id}"

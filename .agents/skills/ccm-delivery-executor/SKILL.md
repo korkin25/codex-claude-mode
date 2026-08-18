@@ -127,8 +127,17 @@ its whole repository. The claimed work must already be `ready`, its dependencies
 and its external prerequisites `available` in the issuance snapshot. Dependency
 evidence must be `merge_ci` evidence owned by the dependency repository;
 external cross-owner evidence is accepted only through that external
-capability's explicit `evidence_refs`. Every evidence record must have been
-verified no later than the claim's `issued_at`. Each state's evidence digests
+capability's explicit `evidence_refs`. Dependency evidence must carry its
+repository's complete normative check contract; a merge that predates a job or
+the owner capability manifest is admitted only through the inspector's
+enumerated pre-contract merge SHAs, with the exact set its own workflow
+declared. Every evidence record must have been
+verified no later than the claim's `issued_at`. An evidence record may carry the
+optional AOR baseline `lineage` (`type`, `generation`, `supersedes`); when
+present it must be an `aor_baseline` triple on an `aor`-owned
+`evidence-aor-baseline-*` record, and the snapshot's chain must hold one record
+per generation, contiguous from one, each naming the generation it replaces.
+Each state's evidence digests
 are checked against its own issuance snapshot, so later readiness or evidence
 cannot authorize an earlier claim. Every
 predecessor must have a real terminal status. Every Git

@@ -947,5 +947,217 @@ class ExecutionStateTests(unittest.TestCase):
             ours, {"repository_id": "ccm-public", "work_item_id": "CCM-DOCS-001",
                    "capabilities": ["ccm.public-docs"]}))
 
+    def aor_baseline(self, index, *, lineage=True, **overrides):
+        """One AOR baseline evidence record shaped exactly like the controller writes it."""
+        token = "0123456789abcdef"[index]
+        record = {"id": f"evidence-aor-baseline-{token * 7}", "kind": "merge_ci",
+            "repository_id": "aor", "merge_sha": token * 40,
+            "content_digest": "sha256:" + token * 64,
+            "ci": {"provider": "github-actions", "run_id": str(index + 1),
+                   "url": f"https://github.com/korkin25/agent-orchestrator/actions/runs/{index + 1}",
+                   "head_sha": token * 40, "status": "success",
+                   "required_checks": sorted(inspector.NORMATIVE_CHECKS["aor"])},
+            "check_contract": None, "verified_at": "2026-01-01T00:00:00Z",
+            "verifier": "controller", "provenance": "measured"}
+        if lineage:
+            supersedes = None if index == 0 else f"evidence-aor-baseline-{'0123456789abcdef'[index - 1] * 7}"
+            record["lineage"] = {"type": "aor_baseline", "generation": index + 1,
+                                 "supersedes": supersedes}
+        record.update(overrides)
+        return record
+
+    def with_evidence(self, *records):
+        def mutate(documents):
+            documents["evidence.json"]["evidence"].extend(copy.deepcopy(records))
+        return mutate
+
+    def baseline_where(self, index):
+        return f"controller.evidence.evidence-aor-baseline-{'0123456789abcdef'[index] * 7}"
+
+    def test_aor_baseline_lineage_chain_is_admitted(self):
+        # The live ccm-multi registry carries one AOR baseline chain that grows by one
+        # generation per refresh. Only its shape is pinned here: binding the test to the
+        # current baseline SHAs would break on the next refresh without a real defect.
+        for generations in (1, 2, 3):
+            with self.subTest(generations=generations):
+                chain = [self.aor_baseline(index) for index in range(generations)]
+                result = self.inspect_registry([self.claim], self.with_evidence(*chain))
+                self.assertEqual(("clean", True),
+                                 (result["classification"], result["admitted"]))
+
+    def test_baseline_evidence_without_lineage_is_still_admitted(self):
+        # The registry is append-only and keeps baselines recorded before the lineage.
+        result = self.inspect_registry(
+            [self.claim], self.with_evidence(self.aor_baseline(0, lineage=False)))
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
+    def test_unknown_key_inside_lineage_is_rejected(self):
+        record = self.aor_baseline(0)
+        record["lineage"]["note"] = "annotation"
+        result = self.inspect_registry([self.claim], self.with_evidence(record))
+        self.assertFalse(result["admitted"])
+        self.assertIn(f"UNKNOWN {self.baseline_where(0)}.lineage: note", result["errors"])
+
+    def test_incomplete_lineage_triple_is_rejected(self):
+        record = self.aor_baseline(0)
+        del record["lineage"]["supersedes"]
+        result = self.inspect_registry([self.claim], self.with_evidence(record))
+        self.assertFalse(result["admitted"])
+        self.assertIn(f"MISSING {self.baseline_where(0)}.lineage: supersedes", result["errors"])
+
+    def test_malformed_lineage_fields_are_rejected(self):
+        where = f"{self.baseline_where(0)}.lineage"
+        for label, lineage, expected in (
+            ("type", {"type": "aor-baseline"}, f"EVIDENCE_LINEAGE_TYPE {where}"),
+            ("unknown-type", {"type": "public_baseline"}, f"EVIDENCE_LINEAGE_TYPE {where}"),
+            ("generation-string", {"generation": "1"}, f"FORMAT {where}.generation"),
+            ("generation-boolean", {"generation": True}, f"FORMAT {where}.generation"),
+            ("generation-zero", {"generation": 0}, f"FORMAT {where}.generation"),
+            ("generation-float", {"generation": 1.0}, f"FORMAT {where}.generation"),
+            ("supersedes-integer", {"generation": 2, "supersedes": 1},
+             f"FORMAT {where}.supersedes"),
+            ("supersedes-format", {"generation": 2, "supersedes": "aor-baseline"},
+             f"FORMAT {where}.supersedes"),
+            ("lineage-not-object", None, f"TYPE {where}: expected object"),
+        ):
+            with self.subTest(case=label):
+                record = self.aor_baseline(0)
+                if lineage is None:
+                    record["lineage"] = "aor_baseline"
+                else:
+                    record["lineage"].update(lineage)
+                result = self.inspect_registry([self.claim], self.with_evidence(record))
+                self.assertFalse(result["admitted"])
+                self.assertIn(expected, result["errors"])
+
+    def test_lineage_origin_must_match_generation_one(self):
+        where = f"{self.baseline_where(0)}.lineage"
+        for label, lineage in (
+            ("first-generation-supersedes", {"generation": 1,
+                                             "supersedes": "evidence-aor-baseline-9999999"}),
+            ("later-generation-opens-chain", {"generation": 2, "supersedes": None}),
+        ):
+            with self.subTest(case=label):
+                record = self.aor_baseline(0)
+                record["lineage"].update(lineage)
+                result = self.inspect_registry([self.claim], self.with_evidence(record))
+                self.assertFalse(result["admitted"])
+                self.assertIn(f"EVIDENCE_LINEAGE_ORIGIN {where}", result["errors"])
+
+    def test_lineage_outside_aor_baseline_evidence_is_rejected(self):
+        for label, overrides in (
+            ("foreign-repository", {"repository_id": "ccm-multi"}),
+            ("foreign-id", {"id": "evidence-aor-owner-0000000"}),
+        ):
+            with self.subTest(case=label):
+                record = self.aor_baseline(0, **overrides)
+                result = self.inspect_registry([self.claim], self.with_evidence(record))
+                self.assertFalse(result["admitted"])
+                self.assertIn(
+                    f"EVIDENCE_LINEAGE_SCOPE controller.evidence.{record['id']}",
+                    result["errors"])
+
+    def test_lineage_chain_rejects_fork_gap_dangling_and_disorder(self):
+        first, second, third = (self.aor_baseline(index) for index in range(3))
+        sibling = copy.deepcopy(second)
+        sibling["id"] = "evidence-aor-baseline-2222222"
+        gap = copy.deepcopy(third)
+        gap["lineage"]["supersedes"] = None
+        dangling = copy.deepcopy(second)
+        dangling["lineage"]["supersedes"] = "evidence-aor-baseline-9999999"
+        disorder = copy.deepcopy(third)
+        disorder["lineage"]["supersedes"] = first["id"]
+        for label, records, expected in (
+            ("fork", (first, second, sibling),
+             f"CONTROLLER_EVIDENCE_LINEAGE_FORK controller aor_baseline generation=2 "
+             f"ids={second['id']},{sibling['id']}"),
+            ("gap", (first, gap),
+             "CONTROLLER_EVIDENCE_LINEAGE_GAP controller aor_baseline generations=1,3"),
+            ("dangling", (first, dangling),
+             f"CONTROLLER_EVIDENCE_LINEAGE_MISSING {self.baseline_where(1)} "
+             "evidence-aor-baseline-9999999"),
+            ("disorder", (first, second, disorder),
+             f"CONTROLLER_EVIDENCE_LINEAGE_ORDER {self.baseline_where(2)} "
+             f"actual={first['id']} expected={second['id']}"),
+        ):
+            with self.subTest(case=label):
+                result = self.inspect_registry([self.claim], self.with_evidence(*records))
+                self.assertFalse(result["admitted"])
+                self.assertIn(expected, result["errors"])
+
+    def historical_evidence(self, repository_id, merge_sha, checks, **overrides):
+        record = {"id": "evidence-historical", "kind": "merge_ci",
+            "repository_id": repository_id, "merge_sha": merge_sha,
+            "content_digest": "sha256:" + "a" * 64,
+            "ci": {"provider": "github-actions", "run_id": "7",
+                   "url": f"{inspector.REPOSITORY_WEB[repository_id]}/actions/runs/7",
+                   "head_sha": merge_sha, "status": "success",
+                   "required_checks": sorted(checks)},
+            "check_contract": None, "verified_at": "2026-01-01T00:00:00Z",
+            "verifier": "controller", "provenance": "measured"}
+        record.update(overrides)
+        return record
+
+    def evidence_errors(self, record):
+        errors = []
+        inspector.validate_evidence(
+            record, datetime.fromisoformat("2026-08-17T00:00:00+00:00"), "evidence", errors)
+        return errors
+
+    def test_pre_contract_merge_keeps_the_checks_its_own_workflow_declared(self):
+        for repository_id, merge_sha in sorted(inspector.HISTORICAL_CHECKS):
+            checks = inspector.HISTORICAL_CHECKS[(repository_id, merge_sha)]
+            with self.subTest(repository=repository_id, merge_sha=merge_sha[:7]):
+                self.assertEqual([], self.evidence_errors(
+                    self.historical_evidence(repository_id, merge_sha, checks)))
+                # The identical reduced set on any other merge is not normative: a check
+                # name comes from the workflow, so only that exact tree lacked the job.
+                self.assertIn("EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE evidence",
+                              self.evidence_errors(
+                                  self.historical_evidence(repository_id, "f" * 40, checks)))
+
+    def test_pre_manifest_merge_may_carry_no_check_contract(self):
+        for repository_id, merge_sha in sorted(inspector.HISTORICAL_UNCONTRACTED):
+            with self.subTest(merge_sha=merge_sha[:7]):
+                checks = inspector.HISTORICAL_CHECKS[(repository_id, merge_sha)]
+                self.assertEqual([], self.evidence_errors(
+                    self.historical_evidence(repository_id, merge_sha, checks)))
+        # Every later merge of an owner repository must still bind its manifest.
+        self.assertIn("EVIDENCE_CHECK_CONTRACT_REQUIRED evidence", self.evidence_errors(
+            self.historical_evidence("ccm-public", "f" * 40,
+                                     inspector.NORMATIVE_CHECKS["ccm-public"])))
+
+    def test_historical_check_tables_only_narrow_the_current_contract(self):
+        for (repository_id, merge_sha), checks in inspector.HISTORICAL_CHECKS.items():
+            with self.subTest(repository=repository_id, merge_sha=merge_sha[:7]):
+                self.assertRegex(merge_sha, r"^[0-9a-f]{40}$")
+                # A pre-contract merge may only lack checks, never invent one.
+                self.assertLess(frozenset(checks),
+                                frozenset(inspector.NORMATIVE_CHECKS[repository_id]))
+        self.assertLessEqual(inspector.HISTORICAL_UNCONTRACTED, set(inspector.HISTORICAL_CHECKS))
+        for repository_id, _ in inspector.HISTORICAL_UNCONTRACTED:
+            self.assertIn(repository_id, inspector.CHECK_CONTRACT)
+
+    def test_pre_contract_dependency_evidence_admits_the_claim_end_to_end(self):
+        merge_sha = "c8c1589db37ae7c5f0625994d23886c7dc1afb36"
+        self.evidence["merge_sha"] = merge_sha
+        self.evidence["ci"].update({"head_sha": merge_sha,
+                                    "required_checks": sorted(inspector.BASELINE_RUST_CHECKS)})
+        result = self.inspect_registry([self.claim])
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+        self.evidence["merge_sha"] = "f" * 40
+        self.evidence["ci"]["head_sha"] = "f" * 40
+        result = self.inspect_registry([self.claim])
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            "EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE controller.evidence.evidence-dependency",
+            result["errors"])
+
+    def test_evidence_key_table_mirrors_the_controller_schema(self):
+        self.assertEqual({"lineage"}, inspector.EVIDENCE_OPTIONAL_KEYS)
+        self.assertEqual({"type", "generation", "supersedes"}, inspector.EVIDENCE_LINEAGE_KEYS)
+        self.assertEqual({"aor_baseline"}, inspector.EVIDENCE_LINEAGE_TYPES)
+        self.assertFalse(inspector.EVIDENCE_KEYS & inspector.EVIDENCE_OPTIONAL_KEYS)
+
 
 if __name__ == "__main__": unittest.main()
