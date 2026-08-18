@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -26,14 +27,14 @@ VALIDATOR_SCRIPT = SKILL / "scripts/validate_report.py"
 
 # Canonical source of this copy. The five skill files are taken verbatim from
 # korkin25/ccm-multi at commit
-# ba206f183661d810b1822c7763c136cb78084389
-# ("Merge pull request #43 from korkin25/design/telegram-report-canon").
+# 47cf085e3d82e8cdb57af7bbc01e21a95ae3d861
+# ("Merge pull request #46 from korkin25/fix/reporter-three-dot-changed-files").
 # Re-synchronising the copy and updating EXPECTED_SKILL_DIGEST below must happen
 # in one commit, so the recorded SHA always names the content that is checked in.
 SOURCE_REPOSITORY = "korkin25/ccm-multi"
-SOURCE_SHA = "ba206f183661d810b1822c7763c136cb78084389"
+SOURCE_SHA = "47cf085e3d82e8cdb57af7bbc01e21a95ae3d861"
 EXPECTED_SKILL_DIGEST = (
-    "sha256:ff3d5d727db8816f0b66638c97b82092e93f09eead52f91a45536b1963ecc8ac"
+    "sha256:e0df1b81b8f5877622eacf82dca05c403535a703b13645b979cd1bda63f2247e"
 )
 SKILL_FILES = (
     "SKILL.md",
@@ -324,6 +325,93 @@ class ReportRenderingTests(unittest.TestCase):
                 payload["ci"]["state"] = state
                 with self.assertRaisesRegex(reporter.ReportError, "successful"):
                     self.render(payload)
+
+
+
+class ChangedPathFixtureTests(unittest.TestCase):
+    """Real-Git regression for a PR base head that moved after the PR opened.
+
+    The vendored copy shipped before this sync measured the changed files with a
+    two-dot `git diff base candidate`, while the provider publishes the PR file
+    set as the three-dot comparison from the fork point. These fixtures build the
+    "base moved" history in a throwaway repository, so the regression is proven
+    locally without a provider, a token, or the network.
+    """
+
+    def git(self, root, *args):
+        executable = verifier._trusted_executable(verifier.GIT_CANDIDATES, "git")
+        identity = {
+            "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(root),
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+0000",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+0000",
+        }
+        completed = subprocess.run(
+            [str(executable), *args], cwd=root, env=identity, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        return completed.stdout.decode("utf-8").strip()
+
+    def commit(self, root, name, message):
+        (root / name).write_text(f"{name}\n", encoding="utf-8")
+        self.git(root, "add", "--", name)
+        self.git(root, "commit", "--no-gpg-sign", "-m", message)
+        return self.git(root, "rev-parse", "HEAD")
+
+    def moved_base_repository(self, root):
+        """Build base, a branch forked from it, then a later foreign base commit."""
+        self.git(root, "init", "--initial-branch=main", "--quiet")
+        fork_point = self.commit(root, "shared.txt", "shared base")
+        self.git(root, "checkout", "--quiet", "-b", "feature")
+        candidate = self.commit(root, "candidate.txt", "candidate work")
+        self.git(root, "checkout", "--quiet", "main")
+        moved_base = self.commit(root, "foreign.txt", "unrelated PR merged into main")
+        return fork_point, candidate, moved_base
+
+    def test_moved_pr_base_measures_the_three_dot_path_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(strict=True)
+            fork_point, candidate, moved_base = self.moved_base_repository(root)
+            self.assertNotEqual(fork_point, moved_base)
+            provider = verifier.Provider()
+
+            measured_fork, paths = provider.changed_paths(root, moved_base, candidate)
+            self.assertEqual(fork_point, measured_fork)
+            self.assertEqual(["candidate.txt"], paths)
+            self.assertEqual(fork_point, provider.merge_base(root, moved_base, candidate))
+
+            # The provider (GitHub) reports exactly the three-dot set; the
+            # two-dot diff the verifier used before additionally reports the
+            # foreign commit's files, inverted, and would fail the file match.
+            two_dot = provider._git(
+                root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", "-z",
+                moved_base, candidate, "--", raw=True,
+            )
+            self.assertEqual(
+                {"candidate.txt", "foreign.txt"}, set(two_dot.rstrip("\0").split("\0"))
+            )
+            three_dot = provider._git(
+                root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", "-z",
+                f"{moved_base}...{candidate}", "--", raw=True,
+            )
+            self.assertEqual(["candidate.txt"], three_dot.rstrip("\0").split("\0"))
+
+    def test_absent_local_merge_base_fails_closed_with_an_explicit_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(strict=True)
+            self.git(root, "init", "--initial-branch=main", "--quiet")
+            base = self.commit(root, "shared.txt", "shared base")
+            self.git(root, "checkout", "--quiet", "--orphan", "unrelated")
+            self.git(root, "rm", "--quiet", "-rf", ".")
+            unrelated = self.commit(root, "unrelated.txt", "unrelated history")
+            provider = verifier.Provider()
+            with self.assertRaisesRegex(
+                verifier.VerificationError, "no locally reachable merge base"
+            ):
+                provider.changed_paths(root, base, unrelated)
 
 
 if __name__ == "__main__":
