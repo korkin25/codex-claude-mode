@@ -1,0 +1,50 @@
+name: Vendored skill source
+
+# The vendored `telegram-delivery-reporter` copy can go stale without a single
+# commit landing here: the canonical implementation lives in the private
+# controller repository, so drift is caused by activity elsewhere. A
+# push/pull_request trigger would therefore never fire on the event that matters
+# — and, on a public repository, pull requests from forks receive no secrets, so
+# the check could not authenticate against the private source anyway. A schedule
+# matches the failure mode; `workflow_dispatch` covers the on-demand run.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendored-skill-source
+  cancel-in-progress: false
+
+jobs:
+  source-drift:
+    name: Vendored skill source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Compare the vendored skill with its source
+        env:
+          # A read-only token that can see the private controller repository.
+          # The repository-scoped GITHUB_TOKEN cannot, so it is not used here.
+          # When the secret is absent the check reports a skip and stays green
+          # rather than failing on missing access.
+          GH_TOKEN: ${{ secrets.CCM_MULTI_READ_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          status=0
+          python3 scripts/check_vendored_skill_source.py > drift.log 2>&1 || status=$?
+          {
+            echo '### Vendored skill source'
+            echo ''
+            echo '```'
+            cat drift.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat drift.log
+          exit "$status"

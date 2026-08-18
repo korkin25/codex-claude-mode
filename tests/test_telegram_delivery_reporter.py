@@ -31,6 +31,10 @@ VALIDATOR_SCRIPT = SKILL / "scripts/validate_report.py"
 # ("Merge pull request #46 from korkin25/fix/reporter-three-dot-changed-files").
 # Re-synchronising the copy and updating EXPECTED_SKILL_DIGEST below must happen
 # in one commit, so the recorded SHA always names the content that is checked in.
+# This digest only proves the copy has not been edited in place; it cannot see
+# the source gaining commits. `scripts/check_vendored_skill_source.py` covers
+# that direction from the recorded Git tree OID of the same directory, and
+# `tests/test_vendored_skill_source.py` keeps the two pins on one revision.
 SOURCE_REPOSITORY = "korkin25/ccm-multi"
 SOURCE_SHA = "47cf085e3d82e8cdb57af7bbc01e21a95ae3d861"
 EXPECTED_SKILL_DIGEST = (
