@@ -31,8 +31,16 @@ Accept a task only when the root supplies all of these from one immutable
 
 Use only the resolved sibling `ccm-multi` checkout and re-read the exact claim object at the separately measured current controller
 SSH head when resuming. Require the issuance commit to remain its ancestor and
-prefetched `origin/main` to equal that head. Require the current object to
-remain identical, active, unexpired, and unsuperseded. Do
+prefetched `origin/main` to equal that head. Require the current object's
+admission-bound identity fields to remain identical, and the claim to remain
+active, unexpired, and unsuperseded. `admission.claim_digest` is the canonical
+digest of exactly those identity fields plus `status: active`, so bounded-lane
+scope fields the controller may add never silently rebind an admission. Every
+other active claim in the registry must stay disjoint from this one under the
+controller's own conflict rules: a different owner repository, work item, and
+exclusive capability, no overlapping `write_paths` inside one repository, and
+no shared `content_scope`. A claim carrying no scope fields claims its whole
+repository and therefore conflicts with every other lane there. Do
 not substitute a mutable branch name, prose report, local checkout, PR label,
 or CI result for exact object content.
 
@@ -78,7 +86,13 @@ value `1`; booleans are rejected rather than treated as integer aliases.
   in the current and issuance registries is validated against the central
   claim-schema semantics: exact keys and types, allowed status, ordered
   timezone-aware issue/expiry times, safe branch, non-empty unique capability
-  IDs, generation, SHA, and evidence-reference formats. The inspector loads and
+  IDs, generation, SHA, and evidence-reference formats. A claim may additionally
+  carry the bounded-lane scope fields `write_paths` and `content_scopes`; they
+  are optional because the append-only registry keeps records issued before
+  scoping existed, and when present they are validated with the same strictness
+  (non-empty, unique, lexically ordered canonical paths whose only wildcard is a
+  trailing `/**`, and identifier-shaped scopes). Any other key still fails
+  closed. The inspector loads and
   strictly validates `claims.json`, `state.json`, and `evidence.json` both at
   the current controller head and at each lineage state's exact
   `admission.controller_commit_sha`. Repository, work-item, capability,

@@ -122,8 +122,11 @@ class ExecutionStateTests(unittest.TestCase):
         contract = {"manifest_digest": inspector.bytes_digest(self.manifest_raw),
                     "todo_digest": inspector.bytes_digest(self.todo_raw),
                     "acceptance": self.acceptance, "capability": capability}
+        # The admission binds the identity fields only; bounded-lane scoping fields a
+        # registry record may additionally carry are deliberately outside the digest.
+        identity = {key: self.claim[key] for key in inspector.CLAIM_KEYS}
         admission = {"controller_commit_sha": self.controller_head,
-            "claim_digest": inspector.canonical_digest(self.claim), "claim_id": self.claim["id"],
+            "claim_digest": inspector.canonical_digest(identity), "claim_id": self.claim["id"],
             "claim_generation": self.claim["generation"], "predecessor": None,
             "owner_principal": self.claim["owner_principal"], "work_item_id": self.claim["work_item_id"],
             "public_capability_id": "ccm.serve.v1", "capabilities": self.claim["capabilities"],
@@ -794,6 +797,155 @@ class ExecutionStateTests(unittest.TestCase):
         self.assertIn("CANDIDATE_ACCEPTANCE_INCOMPLETE", errors)
         self.assertIn("COMPLETED_CHECK_NOT_NORMATIVE", errors)
         self.assertIn("CANDIDATE_REQUIRED_CHECKS_INCOMPLETE", errors)
+
+    def scope_claim(self, **overrides):
+        self.claim = copy.deepcopy(self.claim)
+        self.claim.update({"write_paths": ["src/**"], "content_scopes": ["ccm.serve.v1"]})
+        self.claim.update(overrides)
+        return self.claim
+
+    def second_public_lane(self, documents):
+        documents["state.json"]["capabilities"].append(
+            {"id": "ccm.public-docs", "owner_repository": "ccm-public",
+             "write_exclusive": True, "scope": "public documentation"})
+        documents["state.json"]["work_items"].append(
+            {"id": "CCM-DOCS-001", "owner_repository": "ccm-public",
+             "capabilities": ["ccm.public-docs"], "status": "ready", "dependencies": [],
+             "external_prerequisites": [], "evidence_refs": []})
+
+    def public_lane(self, **overrides):
+        record = {"id": "claim-docs-1", "work_item_id": "CCM-DOCS-001",
+            "owner_principal": "agent-docs", "repository_id": "ccm-public",
+            "base_sha": self.base, "branch": "task/docs",
+            "capabilities": ["ccm.public-docs"], "generation": 1, "status": "active",
+            "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2030-01-01T00:00:00Z",
+            "dependency_evidence_refs": []}
+        record.update(overrides)
+        return record
+
+    def controller_lane(self, **overrides):
+        record = {"id": "claim-multi-1", "work_item_id": "CCM-REMOTE-CTL-001",
+            "owner_principal": "agent-contracts", "repository_id": "ccm-multi",
+            "base_sha": "c" * 40, "branch": "task/contracts",
+            "capabilities": ["multi.contracts"], "generation": 1, "status": "active",
+            "issued_at": "2026-01-01T00:00:00Z", "expires_at": "2030-01-01T00:00:00Z",
+            "dependency_evidence_refs": [],
+            "write_paths": ["product/contracts/**"], "content_scopes": ["shared.protocol"]}
+        record.update(overrides)
+        return record
+
+    def inspect_registry(self, claims, mutate=None):
+        run_git(self.root, "reset", "--hard", self.base)
+        self.controller_head = self.commit_controller(claims, mutate)
+        state = self.state()
+        return self.inspect(state, self.commit_state(state))
+
+    def test_bounded_lane_scope_fields_are_optional_and_admitted(self):
+        result = self.inspect_registry([self.scope_claim()])
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
+    def test_disjoint_parallel_lane_in_another_repository_is_admitted(self):
+        result = self.inspect_registry([self.scope_claim(), self.controller_lane()])
+        self.assertEqual(("clean", True), (result["classification"], result["admitted"]))
+
+    def test_second_active_lane_in_owner_repository_is_rejected(self):
+        for label, other in (
+            ("scoped", self.public_lane(write_paths=["docs/**"],
+                                        content_scopes=["ccm.public-docs"])),
+            ("unscoped", self.public_lane()),
+        ):
+            with self.subTest(other=label):
+                result = self.inspect_registry([self.scope_claim(), other],
+                                               self.second_public_lane)
+                self.assertFalse(result["admitted"])
+                self.assertIn(
+                    "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-docs-1 repository=ccm-public",
+                    result["errors"])
+
+    def test_overlapping_write_path_between_lanes_is_rejected(self):
+        result = self.inspect_registry(
+            [self.scope_claim(), self.public_lane(write_paths=["src/**"],
+                                                  content_scopes=["ccm.public-docs"])],
+            self.second_public_lane)
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-docs-1 repository=ccm-public,path=src/**",
+            result["errors"])
+
+    def test_shared_content_scope_between_lanes_is_rejected(self):
+        result = self.inspect_registry(
+            [self.scope_claim(), self.controller_lane(content_scopes=["ccm.serve.v1"])])
+        self.assertFalse(result["admitted"])
+        self.assertIn(
+            "CONTROLLER_ACTIVE_CLAIM_CONFLICT claim-multi-1 content_scope=ccm.serve.v1",
+            result["errors"])
+
+    def test_revoked_claim_is_still_rejected_as_inactive_lane(self):
+        result = self.inspect_registry([self.scope_claim(status="revoked")])
+        self.assertFalse(result["admitted"])
+        self.assertIn("CONTROLLER_ACTIVE_CLAIM_CONFLICT", result["errors"])
+        self.assertIn("CONTROLLER_CLAIM_REVOKED_OR_CHANGED", result["errors"])
+
+    def test_unknown_claim_key_is_still_rejected(self):
+        result = self.inspect_registry([self.scope_claim(lane="extra")])
+        self.assertFalse(result["admitted"])
+        self.assertIn("UNKNOWN controller.claim.claim-serve-1: lane", result["errors"])
+
+    def test_malformed_lane_scopes_are_rejected(self):
+        where = "controller.claim.claim-serve-1"
+        for label, overrides, expected in (
+            ("order", {"write_paths": ["src/**", "Cargo.toml"]}, f"ORDER {where}.write_paths"),
+            ("traversal", {"write_paths": ["../etc/passwd"]}, f"FORMAT {where}.write_paths[0]"),
+            ("wildcard", {"write_paths": ["src/*.rs"]}, f"FORMAT {where}.write_paths[0]"),
+            ("empty-paths", {"write_paths": []},
+             f"TYPE {where}.write_paths: expected non-empty array"),
+            ("empty-scopes", {"content_scopes": []},
+             f"TYPE {where}.content_scopes: expected non-empty array"),
+            ("scope-format", {"content_scopes": ["Not An Id"]},
+             f"FORMAT {where}.content_scopes[0]"),
+        ):
+            with self.subTest(case=label):
+                result = self.inspect_registry([self.scope_claim(**overrides)])
+                self.assertFalse(result["admitted"])
+                self.assertIn(expected, result["errors"])
+
+    def test_claim_conflict_rules_mirror_controller_bounded_lanes(self):
+        for left, right, overlap in (
+            ("src/**", "src/main.rs", True),
+            ("src/**", "src", True),
+            ("src/**", "srcx/main.rs", False),
+            ("src/a/**", "src/**", True),
+            ("Cargo.toml", "Cargo.toml", True),
+            ("Cargo.toml", "Cargo.lock", False),
+        ):
+            with self.subTest(left=left, right=right):
+                self.assertEqual(overlap, inspector.paths_overlap(left, right))
+                self.assertEqual(overlap, inspector.paths_overlap(right, left))
+        ours = {"repository_id": "ccm-public", "work_item_id": "CCM-SERVE-001",
+                "capabilities": ["ccm.public-client"], "write_paths": ["src/**"],
+                "content_scopes": ["ccm.serve.v1"]}
+        elsewhere = {"repository_id": "ccm-multi", "work_item_id": "CCM-REMOTE-CTL-001",
+                     "capabilities": ["multi.contracts"], "write_paths": ["src/**"],
+                     "content_scopes": ["shared.protocol"]}
+        # Identical paths in a different repository are a different file tree.
+        self.assertEqual([], inspector.claim_conflict_reasons(ours, elsewhere))
+        self.assertEqual(["content_scope=ccm.serve.v1"], inspector.claim_conflict_reasons(
+            ours, {**elsewhere, "content_scopes": ["ccm.serve.v1"]}))
+        self.assertEqual(["work_item=CCM-SERVE-001"], inspector.claim_conflict_reasons(
+            ours, {**elsewhere, "work_item_id": "CCM-SERVE-001"}))
+        self.assertEqual(["capability=ccm.public-client"], inspector.claim_conflict_reasons(
+            ours, {**elsewhere, "capabilities": ["ccm.public-client"]}))
+        self.assertEqual(["repository=ccm-public"], inspector.claim_conflict_reasons(
+            ours, {**elsewhere, "repository_id": "ccm-public", "write_paths": ["docs/**"],
+                   "content_scopes": ["ccm.public-docs"]}))
+        self.assertEqual(["repository=ccm-public", "path=src/**"],
+                         inspector.claim_conflict_reasons(
+                             ours, {**elsewhere, "repository_id": "ccm-public",
+                                    "content_scopes": ["ccm.public-docs"]}))
+        # A record issued before scoping existed claims its whole repository.
+        self.assertEqual(["repository=ccm-public"], inspector.claim_conflict_reasons(
+            ours, {"repository_id": "ccm-public", "work_item_id": "CCM-DOCS-001",
+                   "capabilities": ["ccm.public-docs"]}))
 
 
 if __name__ == "__main__": unittest.main()

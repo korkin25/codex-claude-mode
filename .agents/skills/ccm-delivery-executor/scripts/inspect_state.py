@@ -47,6 +47,9 @@ CLAIM_KEYS = {
     "capabilities", "generation", "status", "issued_at", "expires_at",
     "dependency_evidence_refs",
 }
+# Bounded parallel lanes narrow a claim below its repository. The fields stay optional:
+# the registry is append-only and keeps records issued before scoping existed.
+CLAIM_OPTIONAL_KEYS = {"write_paths", "content_scopes"}
 CLAIM_STATUSES = {"active", "released", "revoked", "expired"}
 TERMINAL_CLAIM_STATUSES = {"released", "revoked", "expired"}
 WORK_KEYS = {
@@ -133,11 +136,13 @@ def load_state(path: Path, errors: list[str]) -> dict[str, Any]:
         return {}
 
 
-def strict_object(value: Any, keys: set[str], where: str, errors: list[str]) -> dict[str, Any]:
+def strict_object(value: Any, keys: set[str], where: str, errors: list[str],
+                  *, optional: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(value, dict):
         errors.append(f"TYPE {where}: expected object")
         return {}
-    missing, extra = sorted(keys - set(value)), sorted(set(value) - keys)
+    missing = sorted(keys - set(value))
+    extra = sorted(set(value) - keys - (optional or set()))
     if missing:
         errors.append(f"MISSING {where}: {','.join(missing)}")
     if extra:
@@ -584,10 +589,77 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
 
 
+def claim_write_paths(value: Any, where: str, errors: list[str]) -> list[str]:
+    """Mirror the controller's canonical write-path syntax: exact paths or a `/**` scope."""
+    paths = string_list(value, where, errors, nonempty=True)
+    if paths != sorted(paths):
+        errors.append(f"ORDER {where}")
+    for index, path in enumerate(paths):
+        scope = path[:-3] if path.endswith("/**") else path
+        components = scope.split("/")
+        if (path != path.strip()
+                or path.startswith("/")
+                or path.endswith("/")
+                or "\\" in path
+                or any(not part or part in {".", ".."} for part in components)
+                or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                or any(marker in path for marker in "?[")
+                or ("*" in path and (not path.endswith("/**") or "*" in path[:-3]))):
+            errors.append(f"FORMAT {where}[{index}]")
+    return paths
+
+
+def paths_overlap(left: str, right: str) -> bool:
+    """Return whether exact paths or trailing /** directory scopes intersect."""
+    left_prefix = left[:-3].rstrip("/") if left.endswith("/**") else None
+    right_prefix = right[:-3].rstrip("/") if right.endswith("/**") else None
+    if left_prefix is None and right_prefix is None:
+        return left == right
+    if left_prefix is not None and right_prefix is not None:
+        return (
+            left_prefix == right_prefix
+            or left_prefix.startswith(right_prefix + "/")
+            or right_prefix.startswith(left_prefix + "/")
+        )
+    prefix, exact = (left_prefix, right) if left_prefix is not None else (right_prefix, left)
+    return exact == prefix or exact.startswith(prefix + "/")
+
+
+def claim_strings(record: dict[str, Any], key: str) -> set[str]:
+    value = record.get(key)
+    return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
+
+
+def claim_conflict_reasons(claim: dict[str, Any], other: dict[str, Any]) -> list[str]:
+    """Mirror the controller's bounded-lane conflict rules for two active claims.
+
+    A record without write_paths/content_scopes claims its whole repository, and the
+    repository rule below already rejects any second active lane there, so a missing
+    or malformed scope never widens what a concurrent lane is allowed to touch.
+    """
+    reasons: list[str] = []
+    repository = claim.get("repository_id")
+    same_repository = repository == other.get("repository_id")
+    if same_repository:
+        reasons.append(f"repository={repository}")
+    if claim.get("work_item_id") == other.get("work_item_id"):
+        reasons.append(f"work_item={claim.get('work_item_id')}")
+    for capability in sorted(claim_strings(claim, "capabilities") & claim_strings(other, "capabilities")):
+        reasons.append(f"capability={capability}")
+    if same_repository:
+        other_paths = claim_strings(other, "write_paths")
+        for path in sorted(claim_strings(claim, "write_paths")):
+            if any(paths_overlap(path, item) for item in other_paths):
+                reasons.append(f"path={path}")
+    for scope in sorted(claim_strings(claim, "content_scopes") & claim_strings(other, "content_scopes")):
+        reasons.append(f"content_scope={scope}")
+    return reasons
+
+
 def validate_controller_claim(record: dict[str, Any], where: str, errors: list[str],
                               at: datetime | None = None) -> None:
     """Mirror the central delivery-schema claim semantics for every registry entry."""
-    strict_object(record, CLAIM_KEYS, where, errors)
+    strict_object(record, CLAIM_KEYS, where, errors, optional=CLAIM_OPTIONAL_KEYS)
     text(record.get("id"), f"{where}.id", errors, ID_RE)
     text(record.get("work_item_id"), f"{where}.work_item_id", errors)
     text(record.get("owner_principal"), f"{where}.owner_principal", errors, ID_RE)
@@ -618,6 +690,13 @@ def validate_controller_claim(record: dict[str, Any], where: str, errors: list[s
     for index, evidence_ref in enumerate(refs):
         if not EVIDENCE_RE.fullmatch(evidence_ref):
             errors.append(f"FORMAT {where}.dependency_evidence_refs[{index}]")
+    if "write_paths" in record:
+        claim_write_paths(record.get("write_paths"), f"{where}.write_paths", errors)
+    if "content_scopes" in record:
+        scopes = string_list(record.get("content_scopes"), f"{where}.content_scopes", errors, nonempty=True)
+        for index, scope in enumerate(scopes):
+            if not ID_RE.fullmatch(scope):
+                errors.append(f"FORMAT {where}.content_scopes[{index}]")
 
 
 def required_evidence_refs(work: dict[str, Any], work_items: dict[str, dict[str, Any]],
@@ -912,6 +991,29 @@ def issuance_prerequisite_errors(snapshot: dict[str, Any], claim: dict[str, Any]
     return errors
 
 
+def admission_claim_identity(admission: dict[str, Any]) -> dict[str, Any]:
+    """Immutable claim fields an execution state binds itself to, status excluded.
+
+    `claim_digest` is defined over this identity plus `status: active`, never over the
+    whole registry record: a record may additionally carry bounded-lane scoping fields
+    that the admission document does not bind.
+    """
+    return {
+        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
+        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
+        "base_sha": admission["base_sha"], "branch": admission["branch"],
+        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
+        "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
+        "dependency_evidence_refs": admission["dependency_evidence_refs"],
+    }
+
+
+def binds_active_claim(claim: dict[str, Any], identity: dict[str, Any]) -> bool:
+    """Whether one registry record is the still-active claim the admission was issued for."""
+    return (claim.get("status") == "active"
+            and all(claim.get(key) == value for key, value in identity.items()))
+
+
 def admission_snapshot_errors(controller_root: Path, controller_head: str, public_root: Path,
                               state: dict[str, Any], at: datetime, where: str) -> list[str]:
     """Authenticate one execution state against its own immutable issuance snapshot."""
@@ -930,17 +1032,10 @@ def admission_snapshot_errors(controller_root: Path, controller_head: str, publi
     claim = snapshot["claims"].get(admission["claim_id"])
     if claim is None:
         return errors + [f"CONTROLLER_ISSUANCE_CLAIM_MISSING {where}"]
-    expected = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
-    if claim != expected:
+    identity = admission_claim_identity(admission)
+    if not binds_active_claim(claim, identity):
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_BINDING_MISMATCH {where}")
-    if canonical_digest(claim) != admission["claim_digest"]:
+    if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_DIGEST_MISMATCH {where}")
     errors.extend(issuance_prerequisite_errors(snapshot, claim, where))
     bindings = {item["id"]: item["digest"] for item in admission["dependency_evidence"]}
@@ -1031,14 +1126,7 @@ def state_claim_identity_errors(state: dict[str, Any], claim: dict[str, Any],
                                 where: str) -> list[str]:
     errors: list[str] = []
     admission = state["admission"]
-    identity = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
+    identity = admission_claim_identity(admission)
     if any(claim.get(key) != value for key, value in identity.items()):
         errors.append(f"LINEAGE_STATE_CLAIM_IDENTITY_MISMATCH {where}")
     if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
@@ -1134,23 +1222,25 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         return errors, False, []
     history_errors, lineage = analyze_claim_history(claims, claim, admission["predecessor"])
     errors.extend(history_errors)
-    if canonical_digest(claim) != admission["claim_digest"]: errors.append("CLAIM_DIGEST_MISMATCH")
-    expected = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
-    if claim != expected:
+    identity = admission_claim_identity(admission)
+    if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
+        errors.append("CLAIM_DIGEST_MISMATCH")
+    if not binds_active_claim(claim, identity):
         errors.extend(["CONTROLLER_CLAIM_REVOKED_OR_CHANGED", "CLAIM_BINDING_MISMATCH"])
     claim_issued = timestamp(claim.get("issued_at"), "controller.claim.issued_at", errors)
     claim_expires = timestamp(claim.get("expires_at"), "controller.claim.expires_at", errors)
     if claim_issued is not None and claim_expires is not None and not claim_issued <= at < claim_expires:
         errors.append("CONTROLLER_CLAIM_EXPIRED_OR_NOT_STARTED")
-    active = [item for item in claims.values() if item.get("status") == "active"]
-    if active != [claim]: errors.append("CONTROLLER_ACTIVE_CLAIM_CONFLICT")
+    # Bounded lanes: this claim must be the active one for its own scope, and every other
+    # active lane must stay disjoint from it under the controller's own conflict rules.
+    if claim.get("status") != "active":
+        errors.append("CONTROLLER_ACTIVE_CLAIM_CONFLICT")
+    for other_id, other in claims.items():
+        if other_id == claim_id or other.get("status") != "active":
+            continue
+        reasons = claim_conflict_reasons(claim, other)
+        if reasons:
+            errors.append(f"CONTROLLER_ACTIVE_CLAIM_CONFLICT {other_id} {','.join(reasons)}")
     later = [item for item in claims.values() if item.get("work_item_id") == claim.get("work_item_id")
              and item.get("repository_id") == "ccm-public" and isinstance(item.get("generation"), int)
              and item["generation"] > claim["generation"]]
@@ -1209,16 +1299,10 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
                 errors.append("PREDECESSOR_ADMISSION_STATE_MISSING")
             else:
                 prior_admission = predecessor_state["admission"]
-                identity = {"id": prior_admission["claim_id"], "work_item_id": prior_admission["work_item_id"],
-                    "owner_principal": prior_admission["owner_principal"], "repository_id": "ccm-public",
-                    "base_sha": prior_admission["base_sha"], "branch": prior_admission["branch"],
-                    "capabilities": prior_admission["capabilities"], "generation": prior_admission["claim_generation"],
-                    "issued_at": prior_admission["issued_at"], "expires_at": prior_admission["expires_at"],
-                    "dependency_evidence_refs": prior_admission["dependency_evidence_refs"]}
-                if any(previous_claim.get(key) != value for key, value in identity.items()):
+                prior_identity = admission_claim_identity(prior_admission)
+                if any(previous_claim.get(key) != value for key, value in prior_identity.items()):
                     errors.append("PREDECESSOR_ADMISSION_IDENTITY_MISMATCH")
-                active_identity = {**identity, "status": "active"}
-                if canonical_digest(active_identity) != prior_admission["claim_digest"]:
+                if canonical_digest({**prior_identity, "status": "active"}) != prior_admission["claim_digest"]:
                     errors.append("PREDECESSOR_ACTIVE_CLAIM_DIGEST_MISMATCH")
     errors.extend(lineage_state_errors(public_root, root, head, state, lineage, at))
     return errors, unavailable, [claim["id"] for claim in lineage]

@@ -118,7 +118,12 @@ every lineage state, all three governance registries (`claims.json`,
 claim, including unrelated terminal claims, must resolve a real repository and
 work item, use only capabilities owned by that repository and contained in the
 work item, and reference valid evidence present in that same immutable
-snapshot. The claimed work must already be `ready`, its dependencies `done`,
+snapshot. A claim may carry the optional bounded-lane scope fields
+`write_paths` and `content_scopes`; the admitted claim must be active and every
+other active claim must stay disjoint from it (different owner repository, work
+item, and exclusive capability, no overlapping write path inside one
+repository, no shared content scope), and a claim without scope fields claims
+its whole repository. The claimed work must already be `ready`, its dependencies `done`,
 and its external prerequisites `available` in the issuance snapshot. Dependency
 evidence must be `merge_ci` evidence owned by the dependency repository;
 external cross-owner evidence is accepted only through that external
