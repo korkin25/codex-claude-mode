@@ -77,33 +77,48 @@ CANDIDATE = "b" * 40
 MERGE = "c" * 40
 
 
+def git(*args, text=True):
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, check=True, text=text,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ).stdout
+
+
+def tracked_skill_files():
+    """Return (mode, repository-relative path) for every tracked file of the skill.
+
+    Only tracked files count. Byte-compiled caches and other build residue that
+    Python may drop next to the scripts are not part of the vendored copy and
+    must not move its digest.
+    """
+    entries = []
+    for entry in git("ls-files", "-s", "-z", "--", SKILL_SCOPE, text=False).split(b"\0"):
+        if not entry:
+            continue
+        meta, path = entry.split(b"\t", 1)
+        mode, _blob, _stage = meta.split(b" ")
+        entries.append((mode.decode("ascii"), path.decode("utf-8")))
+    if not entries:
+        raise RuntimeError(f"{SKILL_SCOPE} has no tracked files; stage the copy first")
+    return sorted(entries)
+
+
 def canonical_skill_digest():
-    """Digest the working-tree skill with the repository's canonical formula.
+    """Digest the skill with the repository's canonical content-scope formula.
 
     `scripts/validate_capabilities.py::canonical_tree_digest` hashes a content
     scope as the deduplicated, sorted, NUL-terminated `git ls-tree -rz
-    --full-tree` records of that scope. The same records are rebuilt here from
-    the files on disk — mode, type, blob ID and repository-relative path — so an
-    edit is caught before it is committed as well as after.
+    --full-tree` records of that scope. The same records are rebuilt here — mode,
+    type, blob ID and repository-relative path — but the blob ID comes from the
+    bytes on disk, so an edit is caught before it is committed as well as after.
     """
     records = set()
-    for path in sorted(SKILL.rglob("*")):
-        if not path.is_file():
-            continue
-        payload = path.read_bytes()
+    for mode, path in tracked_skill_files():
+        payload = (ROOT / path).read_bytes()
         blob = hashlib.sha1(b"blob %d\0" % len(payload) + payload).hexdigest()
-        mode = "100755" if path.stat().st_mode & 0o111 else "100644"
-        record = f"{mode} blob {blob}\t{path.relative_to(ROOT).as_posix()}"
-        records.add(record.encode("utf-8"))
+        records.add(f"{mode} blob {blob}\t{path}".encode("utf-8"))
     canonical = b"".join(record + b"\0" for record in sorted(records))
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
-
-
-def git(*args):
-    return subprocess.run(
-        ["git", *args], cwd=ROOT, check=True, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    ).stdout
 
 
 class VendoredSkillDigestTests(unittest.TestCase):
@@ -113,16 +128,16 @@ class VendoredSkillDigestTests(unittest.TestCase):
         )
 
     def test_vendored_skill_carries_exactly_the_recorded_file_set(self):
-        present = sorted(
-            path.relative_to(SKILL).as_posix()
-            for path in SKILL.rglob("*")
-            if path.is_file()
-        )
+        present = [path[len(SKILL_SCOPE):] for _mode, path in tracked_skill_files()]
         self.assertEqual(sorted(SKILL_FILES), present, RESYNC_INSTRUCTIONS)
+        for _mode, path in tracked_skill_files():
+            with self.subTest(file=path):
+                self.assertTrue((ROOT / path).is_file())
 
     def test_digest_formula_is_the_repository_content_scope_formula(self):
         """Prove the local formula is the one `validate_capabilities.py` uses."""
-        if git("status", "--porcelain", "--", SKILL_SCOPE).strip():
+        dirty = git("status", "--porcelain", "--untracked-files=no", "--", SKILL_SCOPE)
+        if dirty.strip():
             self.skipTest("skill copy differs from HEAD; nothing to cross-check")
         errors = []
         measured = capabilities.canonical_tree_digest(
