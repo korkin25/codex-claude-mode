@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Delivery Reporter"
+  short_description: "Report a verified successful merge"
+  default_prompt: "Use $telegram-delivery-reporter to send one exact, redacted Russian report after a successful merge-SHA CI run."

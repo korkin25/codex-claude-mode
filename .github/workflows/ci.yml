@@ -19,10 +19,13 @@ jobs:
           fetch-depth: 0
 
       - name: Validate public capability manifest
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 scripts/validate_capabilities.py
           python3 -m unittest discover -s tests -p 'test_capability_manifest.py'
           python3 -m unittest discover -s tests -p 'test_delivery_execution_state.py'
+          python3 -m unittest discover -s tests -p 'test_telegram_delivery_reporter.py'
 
   rust:
     name: Rust 1.95 · ${{ matrix.artifact }}
