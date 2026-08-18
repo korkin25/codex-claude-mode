@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -47,6 +47,9 @@ CLAIM_KEYS = {
     "capabilities", "generation", "status", "issued_at", "expires_at",
     "dependency_evidence_refs",
 }
+# Bounded parallel lanes narrow a claim below its repository. The fields stay optional:
+# the registry is append-only and keeps records issued before scoping existed.
+CLAIM_OPTIONAL_KEYS = {"write_paths", "content_scopes"}
 CLAIM_STATUSES = {"active", "released", "revoked", "expired"}
 TERMINAL_CLAIM_STATUSES = {"released", "revoked", "expired"}
 WORK_KEYS = {
@@ -60,6 +63,13 @@ EVIDENCE_KEYS = {
     "id", "kind", "repository_id", "merge_sha", "content_digest", "ci",
     "check_contract", "verified_at", "verifier", "provenance",
 }
+# The controller stamps an explicit supersession chain onto AOR baseline evidence. The
+# key stays optional: the registry is append-only and keeps baseline records written
+# before the lineage existed, so demanding it would reject their issuance snapshots.
+EVIDENCE_OPTIONAL_KEYS = {"lineage"}
+EVIDENCE_LINEAGE_KEYS = {"type", "generation", "supersedes"}
+EVIDENCE_LINEAGE_TYPES = {"aor_baseline"}
+AOR_BASELINE_PREFIX = "evidence-aor-baseline-"
 CI_KEYS = {"provider", "run_id", "url", "head_sha", "status", "required_checks"}
 CHECK_CONTRACT_KEYS = {"path", "format", "content_digest"}
 PHASE_KIND = {
@@ -79,6 +89,39 @@ NORMATIVE_CHECKS = {
     "ccm-multi": {"Delivery governance", "Public capability manifest", "Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"},
     "aor": {"capability-governance (ubuntu-latest)", "capability-governance (macos-latest)"},
 }
+# A GitHub check name comes from the workflow in the merged tree, so a merge cannot have
+# run a job that was added to its repository later. NORMATIVE_CHECKS is the contract in
+# force today; these enumerated pre-contract merges carry the complete set their own
+# `.github/workflows/ci.yml` declared, measured at that exact immutable commit. Both
+# tables are minimal: only merges some admission path actually consumes as dependency
+# evidence appear, because normative validation runs on nothing else. They enumerate the
+# past exhaustively — the controller registry is append-only and every record settled
+# after a contract grew carries NORMATIVE_CHECKS — but they are not closed forever: the
+# next time a repository's required-check contract grows, records issued under today's
+# contract become non-normative and need a new entry, which is a public change here.
+BASELINE_RUST_CHECKS = frozenset({"Rust 1.95 · linux-x86_64", "Rust 1.95 · macos-arm64"})
+HISTORICAL_CHECKS = {
+    # codex-claude-mode before 8e33ddf added the "Public capability manifest" job.
+    ("ccm-public", "2c5382035ecf84724fe796332ed1c252f1fb0bce"): BASELINE_RUST_CHECKS,
+    # ccm-multi before it gained the "Delivery governance" and manifest jobs.
+    ("ccm-multi", "c8c1589db37ae7c5f0625994d23886c7dc1afb36"): BASELINE_RUST_CHECKS,
+}
+# The same merges seen from the other side of CHECK_CONTRACT: 8e33ddf also created
+# `delivery/capabilities.json`, so a merge older than that file has no manifest to bind
+# and its null check_contract is the measured truth rather than a withheld binding.
+# Every entry is also an enumerated pre-contract merge above. This admits exactly one
+# thing — a null `check_contract` — and nothing else: the merge commit must still be
+# reachable from the public HEAD, which is checked separately from the contract.
+HISTORICAL_UNCONTRACTED = frozenset({
+    ("ccm-public", "2c5382035ecf84724fe796332ed1c252f1fb0bce"),
+})
+# Bounded lanes: the controller grants at most this many concurrent claims and never a
+# lease longer than this, so an executor that trusted a longer one would keep writing on
+# a registry the controller can no longer bound.
+MAX_ACTIVE_CLAIMS = 3
+MAX_LEASE_DURATION = timedelta(hours=12)
+# The controller records the AOR baseline it observed through this external capability.
+AOR_BASELINE_EXTERNAL = "external.aor-baseline-observed"
 CHECK_CONTRACT = {
     "ccm-public": ("delivery/capabilities.json", "ccm-capability-manifest-v1"),
     "aor": (".delivery/capabilities.json", "aor-capability-manifest-v1"),
@@ -133,11 +176,13 @@ def load_state(path: Path, errors: list[str]) -> dict[str, Any]:
         return {}
 
 
-def strict_object(value: Any, keys: set[str], where: str, errors: list[str]) -> dict[str, Any]:
+def strict_object(value: Any, keys: set[str], where: str, errors: list[str],
+                  *, optional: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(value, dict):
         errors.append(f"TYPE {where}: expected object")
         return {}
-    missing, extra = sorted(keys - set(value)), sorted(set(value) - keys)
+    missing = sorted(keys - set(value))
+    extra = sorted(set(value) - keys - (optional or set()))
     if missing:
         errors.append(f"MISSING {where}: {','.join(missing)}")
     if extra:
@@ -548,9 +593,150 @@ def unique_index(records: Any, where: str, errors: list[str]) -> dict[str, dict[
     return result
 
 
+def historical_merge_key(repository_id: Any, merge_sha: Any) -> tuple[str, str] | None:
+    """The exact-merge key both historical tables are indexed by, or None.
+
+    Registry values are attacker-shaped until proven otherwise, and a list or object
+    would raise `unhashable type` inside a table lookup instead of producing a verdict.
+    A key exists only for a string repository and a 40-hex merge SHA, which is also the
+    only shape either table ever holds, so a well-formed record keeps its exemption.
+    """
+    if not isinstance(repository_id, str) or not isinstance(merge_sha, str):
+        return None
+    if not SHA_RE.fullmatch(merge_sha):
+        return None
+    return (repository_id, merge_sha)
+
+
+def normative_check_sets(repository_id: Any, merge_sha: Any) -> set[frozenset[str]]:
+    """Every required-check set one exact merge of one repository may normatively carry.
+
+    The current contract always applies. An enumerated pre-contract merge additionally
+    admits the complete set its own workflow declared, keyed by the immutable merge SHA
+    rather than by a self-reported timestamp, so no other record can borrow it.
+    """
+    current = NORMATIVE_CHECKS.get(repository_id) if isinstance(repository_id, str) else None
+    allowed = {frozenset(current)} if current is not None else set()
+    key = historical_merge_key(repository_id, merge_sha)
+    historical = HISTORICAL_CHECKS.get(key) if key is not None else None
+    if historical is not None:
+        allowed.add(historical)
+    return allowed
+
+
+def validate_evidence_lineage(record: dict[str, Any], where: str, errors: list[str]) -> None:
+    """Mirror the controller's per-record AOR baseline lineage rules.
+
+    The controller admits `lineage` only on AOR baseline evidence and requires the exact
+    triple there, so an unknown key inside it stays an error just like anywhere else.
+    """
+    lineage_where = f"{where}.lineage"
+    evidence_id = record.get("id")
+    if (not isinstance(evidence_id, str) or not evidence_id.startswith(AOR_BASELINE_PREFIX)
+            or record.get("repository_id") != "aor"):
+        errors.append(f"EVIDENCE_LINEAGE_SCOPE {where}")
+    lineage = strict_object(record.get("lineage"), EVIDENCE_LINEAGE_KEYS, lineage_where, errors)
+    if not lineage:
+        return
+    if lineage.get("type") not in EVIDENCE_LINEAGE_TYPES:
+        errors.append(f"EVIDENCE_LINEAGE_TYPE {lineage_where}")
+    generation = lineage.get("generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        errors.append(f"FORMAT {lineage_where}.generation")
+        generation = None
+    supersedes = lineage.get("supersedes")
+    if supersedes is not None and (not isinstance(supersedes, str)
+                                   or not EVIDENCE_RE.fullmatch(supersedes)):
+        errors.append(f"FORMAT {lineage_where}.supersedes")
+    elif generation is not None and (generation == 1) != (supersedes is None):
+        # Generation one opens the chain and supersedes nothing; every later generation
+        # names the record it replaces.
+        errors.append(f"EVIDENCE_LINEAGE_ORIGIN {lineage_where}")
+
+
+def validate_evidence_lineage_chain(evidence: dict[str, dict[str, Any]], label: str,
+                                    errors: list[str]) -> dict[str, str]:
+    """Mirror the controller's append-only supersession chain across one snapshot.
+
+    Only records carrying a well-formed lineage take part: validate_evidence already
+    reports malformed ones, and a snapshot older than the lineage carries none at all.
+    A cycle cannot survive these rules, because contiguous generations plus "each record
+    names its immediate predecessor" admit exactly one line per lineage type.
+
+    Returns the tip of every chain that came out intact, keyed by lineage type. A chain
+    that forked, gapped or lost its order has no usable tip and is omitted.
+    """
+    tips: dict[str, str] = {}
+    chains: dict[str, dict[int, list[str]]] = {}
+    supersedes_by_id: dict[str, str | None] = {}
+    for evidence_id, record in sorted(evidence.items()):
+        lineage = record.get("lineage")
+        if not isinstance(lineage, dict):
+            continue
+        kind, generation, supersedes = (lineage.get("type"), lineage.get("generation"),
+                                        lineage.get("supersedes"))
+        if (kind not in EVIDENCE_LINEAGE_TYPES or not isinstance(generation, int)
+                or isinstance(generation, bool) or generation < 1
+                or (supersedes is not None and not isinstance(supersedes, str))):
+            continue
+        if supersedes is not None and supersedes not in evidence:
+            errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_MISSING {label}.evidence.{evidence_id} {supersedes}")
+        chains.setdefault(kind, {}).setdefault(generation, []).append(evidence_id)
+        supersedes_by_id[evidence_id] = supersedes
+    for kind, by_generation in sorted(chains.items()):
+        intact = True
+        for generation, ids in sorted(by_generation.items()):
+            if len(ids) != 1:
+                intact = False
+                errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_FORK {label} {kind} "
+                              f"generation={generation} ids={','.join(sorted(ids))}")
+        if set(by_generation) != set(range(1, len(by_generation) + 1)):
+            intact = False
+            generations = ",".join(str(item) for item in sorted(by_generation))
+            errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_GAP {label} {kind} generations={generations}")
+        line = {generation: ids[0] for generation, ids in by_generation.items() if len(ids) == 1}
+        for generation, evidence_id in sorted(line.items()):
+            expected = None if generation == 1 else line.get(generation - 1)
+            if supersedes_by_id[evidence_id] != expected:
+                intact = False
+                errors.append(f"CONTROLLER_EVIDENCE_LINEAGE_ORDER {label}.evidence.{evidence_id} "
+                              f"actual={supersedes_by_id[evidence_id]} expected={expected}")
+        if intact and by_generation:
+            tips[kind] = line[max(by_generation)]
+    return tips
+
+
+def validate_aor_baseline_tip(evidence: dict[str, dict[str, Any]],
+                              externals: dict[str, dict[str, Any]], tips: dict[str, str],
+                              label: str, errors: list[str]) -> None:
+    """Mirror the controller's rule that the observed AOR baseline is the chain tip.
+
+    Parsing a supersession chain is only worth something if something has to point at
+    its end; without this rule a superseded baseline stays admissible and the lineage
+    decides nothing. The rule fires only once the snapshot actually carries the lineage:
+    the registry is append-only and its pre-lineage baselines have no chain to head.
+    """
+    external = externals.get(AOR_BASELINE_EXTERNAL)
+    if external is None or external.get("state") != "available":
+        return
+    refs = external.get("evidence_refs")
+    if not isinstance(refs, list) or len(refs) != 1 or not isinstance(refs[0], str):
+        errors.append(f"CONTROLLER_AOR_BASELINE_EVIDENCE_NOT_SINGLETON {label}")
+        return
+    observed = evidence.get(refs[0])
+    if observed is None:
+        return
+    tip = tips.get("aor_baseline")
+    if tip is None and "lineage" not in observed:
+        return
+    if refs[0] != tip:
+        errors.append(f"CONTROLLER_AOR_BASELINE_NOT_LINEAGE_TIP {label} "
+                      f"observed={refs[0]} tip={tip}")
+
+
 def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: list[str],
                       *, normative: bool = True) -> None:
-    strict_object(record, EVIDENCE_KEYS, where, errors)
+    strict_object(record, EVIDENCE_KEYS, where, errors, optional=EVIDENCE_OPTIONAL_KEYS)
     text(record.get("id"), f"{where}.id", errors, EVIDENCE_RE)
     if record.get("kind") not in {"merge_ci", "external_probe"}: errors.append(f"EVIDENCE_KIND {where}")
     repository_id = text(record.get("repository_id"), f"{where}.repository_id", errors, ID_RE)
@@ -567,14 +753,15 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
     if ci.get("url") != expected_url: errors.append(f"EVIDENCE_CI_URL {where}")
     if ci.get("head_sha") != record.get("merge_sha"): errors.append(f"EVIDENCE_CI_SHA_MISMATCH {where}")
     checks = string_list(ci.get("required_checks"), f"{where}.ci.required_checks", errors, nonempty=True)
-    if normative and (repository_id not in NORMATIVE_CHECKS
-                      or set(checks) != NORMATIVE_CHECKS.get(repository_id)):
+    if normative and frozenset(checks) not in normative_check_sets(repository_id, record.get("merge_sha")):
         errors.append(f"EVIDENCE_REQUIRED_CHECKS_NONNORMATIVE {where}")
     contract = record.get("check_contract")
     expected_contract = CHECK_CONTRACT.get(repository_id)
     if expected_contract is None and contract is not None:
         errors.append(f"EVIDENCE_CHECK_CONTRACT_UNEXPECTED {where}")
-    elif normative and expected_contract is not None and contract is None:
+    elif (normative and expected_contract is not None and contract is None
+            and historical_merge_key(repository_id, record.get("merge_sha"))
+            not in HISTORICAL_UNCONTRACTED):
         errors.append(f"EVIDENCE_CHECK_CONTRACT_REQUIRED {where}")
     elif contract is not None:
         contract = strict_object(contract, CHECK_CONTRACT_KEYS, f"{where}.check_contract", errors)
@@ -582,12 +769,102 @@ def validate_evidence(record: dict[str, Any], at: datetime, where: str, errors: 
         if (contract.get("path"), contract.get("format")) != expected_contract:
             errors.append(f"EVIDENCE_CHECK_CONTRACT_BINDING {where}")
         text(contract.get("content_digest"), f"{where}.check_contract.content_digest", errors, DIGEST_RE)
+    if "lineage" in record:
+        validate_evidence_lineage(record, where, errors)
+
+
+def claim_write_paths(value: Any, where: str, errors: list[str]) -> list[str]:
+    """Mirror the controller's canonical write-path syntax: exact paths or a `/**` scope."""
+    paths = string_list(value, where, errors, nonempty=True)
+    if paths != sorted(paths):
+        errors.append(f"ORDER {where}")
+    for index, path in enumerate(paths):
+        scope = path[:-3] if path.endswith("/**") else path
+        components = scope.split("/")
+        if (path != path.strip()
+                or path.startswith("/")
+                or path.endswith("/")
+                or "\\" in path
+                or any(not part or part in {".", ".."} for part in components)
+                or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                or any(marker in path for marker in "?[")
+                or ("*" in path and (not path.endswith("/**") or "*" in path[:-3]))):
+            errors.append(f"FORMAT {where}[{index}]")
+    return paths
+
+
+def paths_overlap(left: str, right: str) -> bool:
+    """Return whether exact paths or trailing /** directory scopes intersect."""
+    left_prefix = left[:-3].rstrip("/") if left.endswith("/**") else None
+    right_prefix = right[:-3].rstrip("/") if right.endswith("/**") else None
+    if left_prefix is None and right_prefix is None:
+        return left == right
+    if left_prefix is not None and right_prefix is not None:
+        return (
+            left_prefix == right_prefix
+            or left_prefix.startswith(right_prefix + "/")
+            or right_prefix.startswith(left_prefix + "/")
+        )
+    prefix, exact = (left_prefix, right) if left_prefix is not None else (right_prefix, left)
+    return exact == prefix or exact.startswith(prefix + "/")
+
+
+def claim_strings(record: dict[str, Any], key: str) -> set[str]:
+    value = record.get(key)
+    return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
+
+
+def declared_content_scopes(record: dict[str, Any]) -> set[str] | None:
+    """The content scopes a claim declares, or None when it declares none usably.
+
+    Content scopes are cross-repository by construction: they name shared subject matter,
+    not files, so nothing else in the conflict rules bounds a lane that declares none.
+    Treating an absent or malformed field as "no scopes" would silently switch the whole
+    cross-repository rule off, so it fails closed to None and the caller conflicts.
+    """
+    value = record.get("content_scopes")
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    return set(value)
+
+
+def claim_conflict_reasons(claim: dict[str, Any], other: dict[str, Any]) -> list[str]:
+    """Mirror the controller's bounded-lane conflict rules for two active claims.
+
+    A record without write_paths claims its whole repository, which costs nothing here:
+    the path rule only ever fires inside one repository and the repository rule below
+    already rejects any second active lane there. Content scopes get no such fallback,
+    so an undeclared one conflicts with every concurrent lane.
+    """
+    reasons: list[str] = []
+    repository = claim.get("repository_id")
+    same_repository = repository == other.get("repository_id")
+    if same_repository:
+        reasons.append(f"repository={repository}")
+    if claim.get("work_item_id") == other.get("work_item_id"):
+        reasons.append(f"work_item={claim.get('work_item_id')}")
+    for capability in sorted(claim_strings(claim, "capabilities") & claim_strings(other, "capabilities")):
+        reasons.append(f"capability={capability}")
+    if same_repository:
+        other_paths = claim_strings(other, "write_paths")
+        for path in sorted(claim_strings(claim, "write_paths")):
+            if any(paths_overlap(path, item) for item in other_paths):
+                reasons.append(f"path={path}")
+    scopes, other_scopes = declared_content_scopes(claim), declared_content_scopes(other)
+    if scopes is None or other_scopes is None:
+        reasons.append("content_scope=undeclared")
+    else:
+        for scope in sorted(scopes & other_scopes):
+            reasons.append(f"content_scope={scope}")
+    return reasons
 
 
 def validate_controller_claim(record: dict[str, Any], where: str, errors: list[str],
                               at: datetime | None = None) -> None:
     """Mirror the central delivery-schema claim semantics for every registry entry."""
-    strict_object(record, CLAIM_KEYS, where, errors)
+    strict_object(record, CLAIM_KEYS, where, errors, optional=CLAIM_OPTIONAL_KEYS)
     text(record.get("id"), f"{where}.id", errors, ID_RE)
     text(record.get("work_item_id"), f"{where}.work_item_id", errors)
     text(record.get("owner_principal"), f"{where}.owner_principal", errors, ID_RE)
@@ -609,6 +886,10 @@ def validate_controller_claim(record: dict[str, Any], where: str, errors: list[s
     expires = timestamp(record.get("expires_at"), f"{where}.expires_at", errors)
     if issued is not None and expires is not None and issued >= expires:
         errors.append(f"CLAIM_TIME_ORDER {where}")
+    elif issued is not None and expires is not None and expires - issued > MAX_LEASE_DURATION:
+        # A lease is the window in which the controller can still be wrong about this
+        # lane. Without a cap, one registry write grants an unbounded one.
+        errors.append(f"CLAIM_LEASE_DURATION {where}")
     if at is not None and issued is not None and expires is not None:
         if record.get("status") == "active" and not issued <= at < expires:
             errors.append(f"ACTIVE_CLAIM_TIME_INVALID {where}")
@@ -618,6 +899,13 @@ def validate_controller_claim(record: dict[str, Any], where: str, errors: list[s
     for index, evidence_ref in enumerate(refs):
         if not EVIDENCE_RE.fullmatch(evidence_ref):
             errors.append(f"FORMAT {where}.dependency_evidence_refs[{index}]")
+    if "write_paths" in record:
+        claim_write_paths(record.get("write_paths"), f"{where}.write_paths", errors)
+    if "content_scopes" in record:
+        scopes = string_list(record.get("content_scopes"), f"{where}.content_scopes", errors, nonempty=True)
+        for index, scope in enumerate(scopes):
+            if not ID_RE.fullmatch(scope):
+                errors.append(f"FORMAT {where}.content_scopes[{index}]")
 
 
 def required_evidence_refs(work: dict[str, Any], work_items: dict[str, dict[str, Any]],
@@ -710,6 +998,8 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         validate_evidence(record, at, where, errors, normative=False)
         if record.get("repository_id") not in repositories:
             errors.append(f"CONTROLLER_EVIDENCE_REPOSITORY_MISSING {where}")
+    lineage_tips = validate_evidence_lineage_chain(evidence, label, errors)
+    validate_aor_baseline_tip(evidence, externals, lineage_tips, label, errors)
 
     for external_id, external in externals.items():
         where = f"{label}.external.{external_id}"
@@ -806,6 +1096,14 @@ def validate_controller_snapshot(documents: dict[str, dict[str, Any]], at: datet
         for evidence_id in claim_refs:
             if evidence_id not in evidence:
                 errors.append(f"CONTROLLER_CLAIM_EVIDENCE_MISSING {where} {evidence_id}")
+
+    # Bounded lanes are bounded in number too: the controller admits at most this many
+    # concurrent claims across the whole registry, so a snapshot holding more is one the
+    # controller could not have produced.
+    active_claims = sum(1 for record in claims.values() if record.get("status") == "active")
+    if active_claims > MAX_ACTIVE_CLAIMS:
+        errors.append(f"CONTROLLER_ACTIVE_CLAIM_LIMIT {label} active={active_claims} "
+                      f"max={MAX_ACTIVE_CLAIMS}")
 
     return {
         "repositories": repositories, "capabilities": capabilities, "externals": externals,
@@ -912,6 +1210,50 @@ def issuance_prerequisite_errors(snapshot: dict[str, Any], claim: dict[str, Any]
     return errors
 
 
+def public_evidence_commit_errors(public_root: Path, record: dict[str, Any], contract: Any,
+                                  where: str) -> list[str]:
+    """Bind one dependency-evidence record to a commit this repository really contains.
+
+    Reachability is not part of the manifest binding: it is what makes the merge SHA
+    measurable here at all, so it applies to every ccm-public record including the
+    enumerated pre-manifest merges whose `check_contract` is null. Only the manifest
+    digest itself is unavailable for those, because the file did not exist yet.
+    """
+    if record.get("repository_id") != "ccm-public":
+        return [f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {where}"] if isinstance(contract, dict) else []
+    merge_sha = record.get("merge_sha")
+    if not isinstance(merge_sha, str) or not SHA_RE.fullmatch(merge_sha):
+        # validate_evidence already reports the malformed SHA; never hand it to git.
+        return [f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {where}"]
+    public_head = git(public_root, "rev-parse", "HEAD", check=False).stdout.strip()
+    if not SHA_RE.fullmatch(public_head) or not is_ancestor(public_root, merge_sha, public_head):
+        return [f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {where}"]
+    return []
+
+
+def admission_claim_identity(admission: dict[str, Any]) -> dict[str, Any]:
+    """Immutable claim fields an execution state binds itself to, status excluded.
+
+    `claim_digest` is defined over this identity plus `status: active`, never over the
+    whole registry record: a record may additionally carry bounded-lane scoping fields
+    that the admission document does not bind.
+    """
+    return {
+        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
+        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
+        "base_sha": admission["base_sha"], "branch": admission["branch"],
+        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
+        "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
+        "dependency_evidence_refs": admission["dependency_evidence_refs"],
+    }
+
+
+def binds_active_claim(claim: dict[str, Any], identity: dict[str, Any]) -> bool:
+    """Whether one registry record is the still-active claim the admission was issued for."""
+    return (claim.get("status") == "active"
+            and all(claim.get(key) == value for key, value in identity.items()))
+
+
 def admission_snapshot_errors(controller_root: Path, controller_head: str, public_root: Path,
                               state: dict[str, Any], at: datetime, where: str) -> list[str]:
     """Authenticate one execution state against its own immutable issuance snapshot."""
@@ -930,17 +1272,10 @@ def admission_snapshot_errors(controller_root: Path, controller_head: str, publi
     claim = snapshot["claims"].get(admission["claim_id"])
     if claim is None:
         return errors + [f"CONTROLLER_ISSUANCE_CLAIM_MISSING {where}"]
-    expected = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
-    if claim != expected:
+    identity = admission_claim_identity(admission)
+    if not binds_active_claim(claim, identity):
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_BINDING_MISMATCH {where}")
-    if canonical_digest(claim) != admission["claim_digest"]:
+    if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
         errors.append(f"CONTROLLER_ISSUANCE_CLAIM_DIGEST_MISMATCH {where}")
     errors.extend(issuance_prerequisite_errors(snapshot, claim, where))
     bindings = {item["id"]: item["digest"] for item in admission["dependency_evidence"]}
@@ -953,13 +1288,9 @@ def admission_snapshot_errors(controller_root: Path, controller_head: str, publi
         if canonical_digest(record) != bindings.get(evidence_id):
             errors.append(f"CONTROLLER_ISSUANCE_EVIDENCE_DIGEST_MISMATCH {where} {evidence_id}")
         contract = record.get("check_contract")
-        if isinstance(contract, dict):
-            if record.get("repository_id") != "ccm-public":
-                errors.append(f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {where} {evidence_id}")
-                continue
-            public_head = git(public_root, "rev-parse", "HEAD", check=False).stdout.strip()
-            if not is_ancestor(public_root, record.get("merge_sha", ""), public_head):
-                errors.append(f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {where} {evidence_id}")
+        errors.extend(public_evidence_commit_errors(
+            public_root, record, contract, f"{where} {evidence_id}"))
+        if isinstance(contract, dict) and record.get("repository_id") == "ccm-public":
             content = git_bytes(
                 public_root, "show", f"{record.get('merge_sha')}:{contract.get('path')}"
             )
@@ -1031,14 +1362,7 @@ def state_claim_identity_errors(state: dict[str, Any], claim: dict[str, Any],
                                 where: str) -> list[str]:
     errors: list[str] = []
     admission = state["admission"]
-    identity = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
+    identity = admission_claim_identity(admission)
     if any(claim.get(key) != value for key, value in identity.items()):
         errors.append(f"LINEAGE_STATE_CLAIM_IDENTITY_MISMATCH {where}")
     if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
@@ -1134,23 +1458,25 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         return errors, False, []
     history_errors, lineage = analyze_claim_history(claims, claim, admission["predecessor"])
     errors.extend(history_errors)
-    if canonical_digest(claim) != admission["claim_digest"]: errors.append("CLAIM_DIGEST_MISMATCH")
-    expected = {
-        "id": admission["claim_id"], "work_item_id": admission["work_item_id"],
-        "owner_principal": admission["owner_principal"], "repository_id": "ccm-public",
-        "base_sha": admission["base_sha"], "branch": admission["branch"],
-        "capabilities": admission["capabilities"], "generation": admission["claim_generation"],
-        "status": "active", "issued_at": admission["issued_at"], "expires_at": admission["expires_at"],
-        "dependency_evidence_refs": admission["dependency_evidence_refs"],
-    }
-    if claim != expected:
+    identity = admission_claim_identity(admission)
+    if canonical_digest({**identity, "status": "active"}) != admission["claim_digest"]:
+        errors.append("CLAIM_DIGEST_MISMATCH")
+    if not binds_active_claim(claim, identity):
         errors.extend(["CONTROLLER_CLAIM_REVOKED_OR_CHANGED", "CLAIM_BINDING_MISMATCH"])
     claim_issued = timestamp(claim.get("issued_at"), "controller.claim.issued_at", errors)
     claim_expires = timestamp(claim.get("expires_at"), "controller.claim.expires_at", errors)
     if claim_issued is not None and claim_expires is not None and not claim_issued <= at < claim_expires:
         errors.append("CONTROLLER_CLAIM_EXPIRED_OR_NOT_STARTED")
-    active = [item for item in claims.values() if item.get("status") == "active"]
-    if active != [claim]: errors.append("CONTROLLER_ACTIVE_CLAIM_CONFLICT")
+    # Bounded lanes: this claim must be the active one for its own scope, and every other
+    # active lane must stay disjoint from it under the controller's own conflict rules.
+    if claim.get("status") != "active":
+        errors.append("CONTROLLER_ACTIVE_CLAIM_CONFLICT")
+    for other_id, other in claims.items():
+        if other_id == claim_id or other.get("status") != "active":
+            continue
+        reasons = claim_conflict_reasons(claim, other)
+        if reasons:
+            errors.append(f"CONTROLLER_ACTIVE_CLAIM_CONFLICT {other_id} {','.join(reasons)}")
     later = [item for item in claims.values() if item.get("work_item_id") == claim.get("work_item_id")
              and item.get("repository_id") == "ccm-public" and isinstance(item.get("generation"), int)
              and item["generation"] > claim["generation"]]
@@ -1185,16 +1511,12 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
         validate_evidence(record, at, f"controller.evidence.{evidence_id}", errors)
         if canonical_digest(record) != bindings.get(evidence_id): errors.append(f"EVIDENCE_DIGEST_MISMATCH {evidence_id}")
         contract = record.get("check_contract")
-        if isinstance(contract, dict):
-            if record.get("repository_id") != "ccm-public":
-                errors.append(f"EVIDENCE_CHECK_CONTRACT_OWNER_UNAVAILABLE {evidence_id}")
-            else:
-                if not is_ancestor(public_root, record.get("merge_sha", ""), git(public_root, "rev-parse", "HEAD").stdout.strip()):
-                    errors.append(f"EVIDENCE_CHECK_CONTRACT_COMMIT_UNREACHABLE {evidence_id}")
-                content = git_bytes(public_root, "show", f"{record.get('merge_sha')}:{contract.get('path')}")
-                measured = "sha256:" + hashlib.sha256(content.stdout).hexdigest() if content.returncode == 0 else None
-                if measured != contract.get("content_digest"):
-                    errors.append(f"EVIDENCE_CHECK_CONTRACT_DIGEST_MISMATCH {evidence_id}")
+        errors.extend(public_evidence_commit_errors(public_root, record, contract, evidence_id))
+        if isinstance(contract, dict) and record.get("repository_id") == "ccm-public":
+            content = git_bytes(public_root, "show", f"{record.get('merge_sha')}:{contract.get('path')}")
+            measured = bytes_digest(content.stdout) if content.returncode == 0 else None
+            if measured != contract.get("content_digest"):
+                errors.append(f"EVIDENCE_CHECK_CONTRACT_DIGEST_MISMATCH {evidence_id}")
     predecessor = admission["predecessor"]
     if predecessor:
         previous_claim = claims.get(predecessor["claim_id"])
@@ -1209,16 +1531,10 @@ def controller_errors(root: Path, head: str, state: dict[str, Any], at: datetime
                 errors.append("PREDECESSOR_ADMISSION_STATE_MISSING")
             else:
                 prior_admission = predecessor_state["admission"]
-                identity = {"id": prior_admission["claim_id"], "work_item_id": prior_admission["work_item_id"],
-                    "owner_principal": prior_admission["owner_principal"], "repository_id": "ccm-public",
-                    "base_sha": prior_admission["base_sha"], "branch": prior_admission["branch"],
-                    "capabilities": prior_admission["capabilities"], "generation": prior_admission["claim_generation"],
-                    "issued_at": prior_admission["issued_at"], "expires_at": prior_admission["expires_at"],
-                    "dependency_evidence_refs": prior_admission["dependency_evidence_refs"]}
-                if any(previous_claim.get(key) != value for key, value in identity.items()):
+                prior_identity = admission_claim_identity(prior_admission)
+                if any(previous_claim.get(key) != value for key, value in prior_identity.items()):
                     errors.append("PREDECESSOR_ADMISSION_IDENTITY_MISMATCH")
-                active_identity = {**identity, "status": "active"}
-                if canonical_digest(active_identity) != prior_admission["claim_digest"]:
+                if canonical_digest({**prior_identity, "status": "active"}) != prior_admission["claim_digest"]:
                     errors.append("PREDECESSOR_ACTIVE_CLAIM_DIGEST_MISMATCH")
     errors.extend(lineage_state_errors(public_root, root, head, state, lineage, at))
     return errors, unavailable, [claim["id"] for claim in lineage]

@@ -31,8 +31,21 @@ Accept a task only when the root supplies all of these from one immutable
 
 Use only the resolved sibling `ccm-multi` checkout and re-read the exact claim object at the separately measured current controller
 SSH head when resuming. Require the issuance commit to remain its ancestor and
-prefetched `origin/main` to equal that head. Require the current object to
-remain identical, active, unexpired, and unsuperseded. Do
+prefetched `origin/main` to equal that head. Require the current object's
+admission-bound identity fields to remain identical, and the claim to remain
+active, unexpired, and unsuperseded. `admission.claim_digest` is the canonical
+digest of exactly those identity fields plus `status: active`, so bounded-lane
+scope fields the controller may add never silently rebind an admission. Every
+other active claim in the registry must stay disjoint from this one under the
+controller's own conflict rules: a different owner repository, work item, and
+exclusive capability, no overlapping `write_paths` inside one repository, and
+no shared `content_scope`. A claim carrying no `write_paths` claims its whole
+repository, which the repository rule already rejects. `content_scopes` gets no
+such fallback because it is the only rule that reaches across repositories, so
+a claim on either side of the comparison that declares no well-formed
+`content_scopes` conflicts with every concurrent lane. The registry may hold at
+most three active claims, and no claim may hold a lease longer than twelve
+hours. Do
 not substitute a mutable branch name, prose report, local checkout, PR label,
 or CI result for exact object content.
 
@@ -78,7 +91,13 @@ value `1`; booleans are rejected rather than treated as integer aliases.
   in the current and issuance registries is validated against the central
   claim-schema semantics: exact keys and types, allowed status, ordered
   timezone-aware issue/expiry times, safe branch, non-empty unique capability
-  IDs, generation, SHA, and evidence-reference formats. The inspector loads and
+  IDs, generation, SHA, and evidence-reference formats. A claim may additionally
+  carry the bounded-lane scope fields `write_paths` and `content_scopes`; they
+  are optional because the append-only registry keeps records issued before
+  scoping existed, and when present they are validated with the same strictness
+  (non-empty, unique, lexically ordered canonical paths whose only wildcard is a
+  trailing `/**`, and identifier-shaped scopes). Any other key still fails
+  closed. The inspector loads and
   strictly validates `claims.json`, `state.json`, and `evidence.json` both at
   the current controller head and at each lineage state's exact
   `admission.controller_commit_sha`. Repository, work-item, capability,
@@ -87,13 +106,42 @@ value `1`; booleans are rejected rather than treated as integer aliases.
   of the work item's capabilities. At issuance the work item is already
   `ready`, every dependency is `done`, and every external prerequisite is
   `available`. Dependency evidence is `merge_ci` evidence from the dependency
-  work item's owner repository. An external capability's exact
+  work item's owner repository, and its `required_checks` are that repository's
+  complete normative check contract. A GitHub check name comes from the
+  workflow in the merged tree, so a merge cannot have run a job added later:
+  an enumerated set of pre-contract merges, pinned by immutable repository and
+  merge SHA, instead carries the complete contract measured at that exact
+  commit, and the one of them whose tree predates the owner capability manifest
+  carries no `check_contract`. That exemption admits a null `check_contract`
+  and nothing else: a `ccm-public` merge SHA must still name a commit reachable
+  from this repository's HEAD whether or not the record binds a manifest, and
+  only the manifest digest itself is unmeasurable for a tree that predates the
+  file. Both tables list only merges some admission path actually consumes as
+  dependency evidence, because normative validation runs nowhere else. They are
+  exhaustive over the past, not closed forever: the next time a repository's
+  check contract grows, records issued under today's contract need a new entry
+  here, which is a public change. Every other record, and therefore every new
+  merge, must match the current contract exactly. An external capability's exact
   `evidence_refs` are the only normative representation of a cross-owner
   evidence relation; owner relationships are never inferred from an ID or
   prose. Evidence `verified_at` is no later than claim `issued_at`, and the
   claim/state issue, expiry, and checkpoint ordering remains valid. Historical
   evidence objects and their canonical digests are checked at their issuance
-  snapshot, never filled from a later registry. Every lineage
+  snapshot, never filled from a later registry. An evidence record may
+  additionally carry the AOR baseline `lineage`; it is optional because the
+  append-only registry keeps baseline records written before the lineage
+  existed, and when present it is exactly `type`, `generation`, and
+  `supersedes`: an `aor_baseline` type on an `aor`-owned
+  `evidence-aor-baseline-*` record, an integer generation of at least one, and
+  either `null` at generation one or the evidence ID of the record it replaces.
+  Any other key inside it still fails closed. Within one snapshot the chain is
+  append-only: one record per generation, contiguous from one, each naming the
+  immediately preceding generation, so forks, gaps, dangling supersessions, and
+  cycles fail closed. A chain that survives all of that has a tip, and once a
+  snapshot carries one, the single evidence reference of the
+  `external.aor-baseline-observed` capability must be exactly that tip: a
+  superseded baseline is not an observation of the current one. A snapshot older
+  than the lineage carries no chain and no such requirement. Every lineage
   predecessor is strictly terminal (`released`, `revoked`, or `expired`); an
   invented status is not closure.
 - Externally measured SSH `main`, prefetched `origin/main`, and the admission

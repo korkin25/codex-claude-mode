@@ -118,12 +118,32 @@ every lineage state, all three governance registries (`claims.json`,
 claim, including unrelated terminal claims, must resolve a real repository and
 work item, use only capabilities owned by that repository and contained in the
 work item, and reference valid evidence present in that same immutable
-snapshot. The claimed work must already be `ready`, its dependencies `done`,
+snapshot. A claim may carry the optional bounded-lane scope fields
+`write_paths` and `content_scopes`; the admitted claim must be active and every
+other active claim must stay disjoint from it (different owner repository, work
+item, and exclusive capability, no overlapping write path inside one
+repository, no shared content scope). A claim without `write_paths` claims its
+whole repository, which the repository rule already rejects, but a claim
+without a well-formed `content_scopes` conflicts with every concurrent lane in
+any repository: content scopes are the only cross-repository rule and nothing
+bounds a lane that declares none. No registry snapshot may hold more than three
+active claims or a lease longer than twelve hours.
+The claimed work must already be `ready`, its dependencies `done`,
 and its external prerequisites `available` in the issuance snapshot. Dependency
 evidence must be `merge_ci` evidence owned by the dependency repository;
 external cross-owner evidence is accepted only through that external
-capability's explicit `evidence_refs`. Every evidence record must have been
-verified no later than the claim's `issued_at`. Each state's evidence digests
+capability's explicit `evidence_refs`. Dependency evidence must carry its
+repository's complete normative check contract; a merge that predates a job or
+the owner capability manifest is admitted only through the inspector's
+enumerated pre-contract merge SHAs, with the exact set its own workflow
+declared. Every evidence record must have been
+verified no later than the claim's `issued_at`. An evidence record may carry the
+optional AOR baseline `lineage` (`type`, `generation`, `supersedes`); when
+present it must be an `aor_baseline` triple on an `aor`-owned
+`evidence-aor-baseline-*` record, and the snapshot's chain must hold one record
+per generation, contiguous from one, each naming the generation it replaces.
+Once a snapshot carries that chain, the baseline the controller says it
+observed must be its tip. Each state's evidence digests
 are checked against its own issuance snapshot, so later readiness or evidence
 cannot authorize an earlier claim. Every
 predecessor must have a real terminal status. Every Git
