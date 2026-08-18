@@ -78,8 +78,15 @@ canonical SSH target head and its ancestry, plus GitHub merged-PR and workflow
 identity, head, branch, event, terminal conclusion, and exact-attempt jobs.
 `postmerge.tests` must exactly equal the provider's job names and outcomes;
 arbitrary local-check prose is rejected. Changed files are derived with a
-bounded NUL-delimited Git diff between the PR's provider-confirmed base SHA and
-candidate SHA and must exactly match the provider PR file set. Caller-provided
+bounded NUL-delimited Git diff between the measured fork point of the PR's
+provider-confirmed base and candidate SHAs and the candidate SHA, and must
+exactly match the provider PR file set. The provider publishes the PR file set
+as the three-dot comparison, so the fork point is measured as a separate
+`git merge-base` of the provider-confirmed base and candidate commits, must
+resolve to exactly one locally existing commit, and is recorded as a verifier
+check; a base SHA that moved after the PR opened therefore cannot inject the
+inverted contents of unrelated target-branch commits. Missing local merge-base
+history fails closed. Caller-provided
 files, an empty or mismatched list, non-normalized paths, duplicates, and more
 than 64 paths are rejected. The renderer accepts only the
 verifier's process-local normalized object and rejects raw sibling fields.

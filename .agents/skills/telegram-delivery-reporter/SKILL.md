@@ -24,9 +24,9 @@ authority.
    every required fact from Git, the hosting service, and CI.
    Postmerge tests must be the exact GitHub run-attempt job names and outcomes.
    The caller must not provide a changed-file list. The verifier derives the
-   exact normalized paths from the provider-bound PR base and candidate Git
-   objects, compares them with the provider PR file set, and rejects an empty,
-   mismatched, malformed, duplicate, or oversized result.
+   exact normalized paths from the measured fork point of the provider-bound PR
+   base and candidate Git objects, compares them with the provider PR file set,
+   and rejects an empty, mismatched, malformed, duplicate, or oversized result.
    The renderer derives the canonical GitHub project URL from that verified
    repository identity. It renders the repository ID as the project link and
    the source-to-target route without SHAs; the separately verified SHAs remain
@@ -78,7 +78,8 @@ authority.
 
    The verifier measures GitHub PR/run facts with noninteractive `gh`, Git
    branch heads through the canonical SSH remote, and the exact changed paths
-   with a bounded NUL-delimited base-to-candidate Git diff. It then passes a
+   with a bounded NUL-delimited Git diff from the separately measured
+   `git merge-base` fork point to the candidate. It then passes a
    process-local normalized object to the renderer. Never call `validate_report.py`
    directly; it rejects raw event JSON. Use verifier stdout as the exact
    message. Missing credentials/evidence, a provider/ref mismatch, missing or

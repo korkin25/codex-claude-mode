@@ -377,21 +377,44 @@ class Provider:
             raise VerificationError("merge SHA is not contained in SSH target") from exc
         return target_head
 
-    def changed_paths(self, root: Path, base_sha: str, candidate_sha: str) -> list[str]:
-        """Measure the exact PR base-to-candidate path set from trusted Git objects."""
+    def merge_base(self, root: Path, base_sha: str, candidate_sha: str) -> str:
+        """Measure the single fork point the provider compares the PR from."""
+        try:
+            lines = self._git(root, "merge-base", base_sha, candidate_sha).splitlines()
+        except VerificationError as exc:
+            raise VerificationError(
+                "PR base and candidate have no locally reachable merge base; "
+                "fetch both commits with full history first"
+            ) from exc
+        if len(lines) != 1 or not renderer.SHA_RE.fullmatch(lines[0]):
+            raise VerificationError("PR base and candidate merge base is not a single commit")
+        self._git(root, "cat-file", "-e", f"{lines[0]}^{{commit}}")
+        return lines[0]
+
+    def changed_paths(self, root: Path, base_sha: str,
+                      candidate_sha: str) -> tuple[str, list[str]]:
+        """Measure the exact PR fork-point-to-candidate path set from trusted Git objects.
+
+        The provider publishes a pull request's file set as the three-dot
+        comparison, which starts at `merge-base(base, candidate)`. Diffing the
+        recorded base head directly reports every unrelated commit that landed on
+        the target branch after the PR opened, inverted, so the fork point is
+        measured explicitly and the bounded diff runs from that measured commit.
+        """
         base_sha = renderer.sha(base_sha, "pr.baseRefOid")
         candidate_sha = renderer.sha(candidate_sha, "candidate_sha")
         self._git(root, "cat-file", "-e", f"{base_sha}^{{commit}}")
         self._git(root, "cat-file", "-e", f"{candidate_sha}^{{commit}}")
+        fork_sha = self.merge_base(root, base_sha, candidate_sha)
         raw = self._git(
             root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", "-z",
-            base_sha, candidate_sha, "--", raw=True,
+            fork_sha, candidate_sha, "--", raw=True,
         )
         if not raw or not raw.endswith("\0"):
             raise VerificationError("changed files are empty or malformed")
         values = raw[:-1].split("\0")
         try:
-            return renderer.changed_files(values)
+            return fork_sha, renderer.changed_files(values)
         except renderer.ReportError as exc:
             raise VerificationError(str(exc)) from exc
 
@@ -584,7 +607,7 @@ def _verify_postmerge(data: dict[str, Any], root: Path, provider: Provider,
         ])
     except renderer.ReportError as exc:
         raise VerificationError(f"GitHub PR changed files invalid: {exc}") from exc
-    git_paths = provider.changed_paths(root, base_sha, candidate)
+    fork_sha, git_paths = provider.changed_paths(root, base_sha, candidate)
     if sorted(provider_paths) != sorted(git_paths):
         raise VerificationError("GitHub PR and Git changed files mismatch")
     data["files"] = sorted(git_paths)
@@ -601,6 +624,7 @@ def _verify_postmerge(data: dict[str, Any], root: Path, provider: Provider,
     data["ci"] = {"state": "success", "head_sha": merge_sha, "url": run["url"]}
     _bind_reported_jobs(data, normalized_jobs)
     checks.extend([f"ssh-target:{target}@{target_head}:contains:{merge_sha}",
+                   f"git-merge-base:{base_sha}..{candidate}@{fork_sha}",
                    f"github-pr:{pr['number']}", f"github-run:{run_id}"])
 
 
