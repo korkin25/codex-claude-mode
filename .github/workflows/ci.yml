@@ -26,6 +26,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_capability_manifest.py'
           python3 -m unittest discover -s tests -p 'test_delivery_execution_state.py'
           python3 -m unittest discover -s tests -p 'test_telegram_delivery_reporter.py'
+          python3 -m unittest discover -s tests -p 'test_vendored_skill_source.py'
 
   rust:
     name: Rust 1.95 · ${{ matrix.artifact }}
