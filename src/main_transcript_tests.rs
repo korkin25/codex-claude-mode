@@ -29,6 +29,13 @@ use crate::ui::Workspace;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// How long a harness waits for the fake app-server, a separate process, to
+/// make an expected effect observable.  It is a failure budget, not an
+/// expected duration: every wait below returns as soon as the effect it names
+/// is present, so a healthy run never approaches it.
+const HARNESS_DEADLINE: Duration = Duration::from_secs(30);
+const HARNESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
 struct TestDir(PathBuf);
 
 impl TestDir {
@@ -80,9 +87,8 @@ impl Harness {
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions).expect("make fake app-server executable");
-        thread::sleep(Duration::from_millis(10));
         let codex_home = directory.0.join("codex-home");
-        let backend = Backend::spawn(&executable, &codex_home, &[]).expect("spawn fake app-server");
+        let backend = spawn_fake_app_server(&executable, &codex_home);
         let mut workspace = Workspace::new();
         workspace.set_completion_cwd(cwd.to_path_buf());
         let preferred_root = preferred_root.map(str::to_owned);
@@ -118,29 +124,94 @@ impl Harness {
         }
     }
 
-    fn requests(&self) -> Vec<Value> {
-        for _ in 0..50 {
-            if self.requests.exists() {
-                let contents = fs::read_to_string(&self.requests).expect("read requests");
-                if !contents.is_empty() {
-                    return contents
-                        .lines()
-                        .map(|line| serde_json::from_str(line).expect("valid request JSON"))
-                        .collect();
-                }
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        Vec::new()
+    /// Every request the fake app-server has *finished* writing, read without
+    /// waiting.  A trailing chunk without a newline is a torn read of a line
+    /// still being appended and is skipped rather than parsed as JSON.
+    fn written_requests(&self) -> Vec<Value> {
+        let contents = match fs::read_to_string(&self.requests) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => panic!("read {}: {error}", self.requests.display()),
+        };
+        contents
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .map(|line| {
+                serde_json::from_str(line.trim_end())
+                    .unwrap_or_else(|error| panic!("invalid request JSON {line:?}: {error}"))
+            })
+            .collect()
     }
 
+    /// Waits until the fake app-server has written a request satisfying
+    /// `matches`, then returns everything it has written so far.
+    ///
+    /// The app-server is a separate process that appends one line per request,
+    /// so "the transcript file is non-empty" only proves that *some* earlier
+    /// request landed - `initialized` and `skills/list` both precede
+    /// `thread/resume`.  Waiting for the awaited request itself is the only
+    /// sound synchronisation point; returning whatever happened to be flushed
+    /// after a fixed number of polls is what made this harness flaky.
+    fn requests_matching(&self, description: &str, matches: impl Fn(&Value) -> bool) -> Vec<Value> {
+        let deadline = Instant::now() + HARNESS_DEADLINE;
+        loop {
+            let requests = self.written_requests();
+            if requests.iter().any(&matches) {
+                return requests;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake app-server never wrote {description} within {HARNESS_DEADLINE:?}; \
+                 transcript {} holds {} request(s): {requests:?}",
+                self.requests.display(),
+                requests.len()
+            );
+            thread::sleep(HARNESS_POLL_INTERVAL);
+        }
+    }
+
+    /// Waits for a request with `method` and returns the transcript that
+    /// contained it.
+    fn requests_with_method(&self, method: &str) -> Vec<Value> {
+        self.requests_matching(method, |request| request["method"] == method)
+    }
+
+    /// Methods written so far, read without waiting.  Sound only for asserting
+    /// that a method is *absent*, and only once the request that must follow it
+    /// has already been awaited: the app-server appends requests in order, so a
+    /// method the product would have emitted earlier cannot still be in flight.
     fn methods(&self) -> Vec<String> {
-        self.requests()
+        self.written_requests()
             .iter()
             .filter_map(|request| request.get("method").and_then(Value::as_str))
             .map(str::to_owned)
             .collect()
     }
+}
+
+/// Spawning a just-created executable can fail with `ETXTBSY` while another
+/// thread of this test binary still holds a write handle to it across its own
+/// fork, so the spawn is retried until the deadline instead of hoping a fixed
+/// sleep after `chmod` is long enough.
+fn spawn_fake_app_server(executable: &Path, codex_home: &Path) -> Backend {
+    let deadline = Instant::now() + HARNESS_DEADLINE;
+    loop {
+        match Backend::spawn(executable, codex_home, &[]) {
+            Ok(backend) => return backend,
+            Err(error) if Instant::now() < deadline && executable_is_busy(&error) => {
+                thread::sleep(HARNESS_POLL_INTERVAL);
+            }
+            Err(error) => panic!("spawn fake app-server {}: {error:?}", executable.display()),
+        }
+    }
+}
+
+fn executable_is_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+    })
 }
 
 fn thread_value(id: &str, cwd: &Path) -> Value {
@@ -168,7 +239,7 @@ fn explicit_thread_resumes_directly_with_current_cwd_and_never_lists_or_starts()
         )
         .expect("handle initialize");
 
-    let requests = harness.requests();
+    let requests = harness.requests_with_method("thread/resume");
     let resume = requests
         .iter()
         .find(|request| request["method"] == "thread/resume")
@@ -205,6 +276,11 @@ fn explicit_thread_rejects_missing_or_trash_current_cwd_without_resuming() {
             )
             .expect("handle initialize");
 
+        // `skills/list` is the last request the initialize handler sends before
+        // it decides whether to resume, so its arrival proves the decision was
+        // reached and the absence check below is not merely reading an
+        // app-server that has not written anything yet.
+        harness.requests_with_method("skills/list");
         assert!(!harness.methods().iter().any(|method| {
             matches!(
                 method.as_str(),
@@ -548,9 +624,9 @@ fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths()
             use_saved_cwd: true,
         }))
         .expect("select saved cwd");
-    assert!(harness.requests().iter().any(|request| {
+    harness.requests_matching("thread/resume for the saved cwd", |request| {
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(saved)
-    }));
+    });
 
     let mut current = Harness::new(&cwd, None);
     current
@@ -561,9 +637,9 @@ fn recovery_selection_uses_saved_or_current_cwd_and_rejects_unsafe_saved_paths()
             use_saved_cwd: false,
         }))
         .expect("select current cwd");
-    assert!(current.requests().iter().any(|request| {
+    current.requests_matching("thread/resume for the current cwd", |request| {
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(cwd)
-    }));
+    });
 
     let trash = harness
         ._directory
@@ -649,9 +725,9 @@ fn selected_saved_cwd_is_used_when_resume_and_send_is_needed_later() {
         })
         .expect("submit to resumed root");
 
-    assert!(harness.requests().iter().any(|request| {
+    harness.requests_matching("thread/resume for the selected saved cwd", |request| {
         request["method"] == "thread/resume" && request["params"]["cwd"] == json!(saved)
-    }));
+    });
 }
 
 #[test]
